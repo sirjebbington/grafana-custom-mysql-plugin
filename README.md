@@ -63,6 +63,7 @@ Documentation:
 - `docs/AGENT_GUIDE.md`: build, test and deployment steps.
 - `docs/BUILD_PIPELINE_GUIDE.md`: build anatomy, offline/air-gapped and Docker builds, and pipeline preparation.
 - `docs/QUESTIONS.md`: open questions for the IDAM and StarRocks teams.
+- `docs/ORG_AGENT_PROMPT.md`: a step-by-step prompt for the org Claude agent, covering verification, org conventions, pipelines and a draft UAT deployment change.
 - `docs/research/`: how the design was reached, including the StarRocks JWT protocol analysis, Grafana internals and test evidence.
 
 ## License
