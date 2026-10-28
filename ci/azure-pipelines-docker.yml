@@ -1,0 +1,54 @@
+# DRAFT: container build. The agent only needs Docker with BuildKit. Node.js, Go and all tests run inside
+# ci/Dockerfile.build. Use this when agents have Docker but no Go/Node toolchains.
+# Unsigned output: to sign, use ci/azure-pipelines.yml, or add a signing stage (docs/BUILD_PIPELINE_GUIDE.md §6).
+trigger: none
+
+parameters:
+  - name: publish
+    displayName: Publish the package to the Observability feed
+    type: boolean
+    default: false
+
+pool:
+  name: OnPremUnix # confirm: needs Docker
+
+variables:
+  pluginId: kotak-starrocks-datasource
+  # Base images and registries; point at internal mirrors (e.g. the org's ECR) when Docker Hub is not reachable
+  NODE_IMAGE: node:22-bookworm-slim
+  GO_IMAGE: golang:1.25-bookworm
+  NPM_REGISTRY: ''
+  GOPROXY: https://proxy.golang.org,direct
+
+steps:
+  - checkout: self
+
+  - script: |
+      set -euo pipefail
+      v=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n1)
+      echo "##vso[task.setvariable variable=pluginVersion]$v"
+    displayName: Read plugin version
+
+  - script: |
+      set -euo pipefail
+      DOCKER_BUILDKIT=1 docker build -f ci/Dockerfile.build --target artifact \
+        --build-arg NODE_IMAGE="$(NODE_IMAGE)" --build-arg GO_IMAGE="$(GO_IMAGE)" \
+        --build-arg NPM_REGISTRY="$(NPM_REGISTRY)" --build-arg GOPROXY="$(GOPROXY)" \
+        --output type=local,dest="$(Build.ArtifactStagingDirectory)/package" .
+      ls -l "$(Build.ArtifactStagingDirectory)/package"
+    displayName: Build, test, package and verify in containers
+
+  - publish: $(Build.ArtifactStagingDirectory)/package
+    artifact: plugin-zip
+
+  - task: UniversalPackages@0
+    displayName: Publish Universal Package
+    condition: and(succeeded(), eq('${{ parameters.publish }}', true))
+    inputs:
+      command: publish
+      publishDirectory: $(Build.ArtifactStagingDirectory)/package
+      feedsToUsePublish: internal
+      vstsFeedPublish: Observability
+      vstsFeedPackagePublish: $(pluginId) # confirm against grafana-plugin-upload.yml naming
+      versionOption: custom
+      versionPublish: $(pluginVersion)

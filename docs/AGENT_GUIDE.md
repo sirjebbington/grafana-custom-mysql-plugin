@@ -201,8 +201,9 @@ If the build agents sit behind the corporate proxy, set `GOPROXY`, `HTTPS_PROXY`
 ```bash
 npm ci                                        # frontend dependencies (package-lock.json pins them)
 npm run build                                 # frontend → dist/ (module.js, plugin.json, img/, README, LICENSE…)
-mage -v build:linux build:linuxARM64          # backend → dist/gpx_kotak_starrocks_linux_{amd64,arm64}
+./scripts/build-backend.sh                    # backend → dist/gpx_kotak_starrocks_linux_{amd64,arm64} (= mage -v build:linux build:linuxARM64)
 ./scripts/package.sh                          # → package/kotak-starrocks-datasource-<version>.zip (+ .sha256)
+./scripts/verify-package.sh                   # release gate: layout, version, static binaries, checksum
 ```
 
 - The version comes from `package.json` (`"version": "0.1.0"`). It is written into `dist/plugin.json` and the
@@ -385,6 +386,9 @@ Change all of these together:
 ---
 
 ## 9. CI pipeline (Azure DevOps)
+
+> **See [`BUILD_PIPELINE_GUIDE.md`](BUILD_PIPELINE_GUIDE.md)** for the full build investigation, the offline,
+> Docker and native recipes, and step-by-step pipeline preparation. This section is a short summary.
 
 `ci/azure-pipelines.yml` is a **draft** of: install → typecheck/lint/test → Go tests → build (mage + webpack)
 → optional signing → `scripts/package.sh` → publish a pipeline artifact → optional Universal Package publish to

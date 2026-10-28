@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+# Builds, tests and packages the plugin entirely in containers; the host needs only Docker with BuildKit.
+#
+#   docker build -f ci/Dockerfile.build --target artifact --output type=local,dest=out .
+#   → out/kotak-starrocks-datasource-<version>.zip and out/<…>.zip.sha256
+#
+# Behind a corporate network, use internal mirrors for the base images and package registries:
+#   --build-arg NODE_IMAGE=<registry>/node:22-bookworm-slim --build-arg GO_IMAGE=<registry>/golang:1.25-bookworm
+#   --build-arg NPM_REGISTRY=https://<npm-mirror>/ --build-arg GOPROXY=https://<go-mirror>
+# With vendor/ in the build context (go mod vendor), the Go stage needs no module proxy at all.
+# --build-arg RUN_TESTS=false skips typecheck/lint/tests.
+ARG NODE_IMAGE=node:22-bookworm-slim
+ARG GO_IMAGE=golang:1.25-bookworm
+
+FROM ${NODE_IMAGE} AS frontend
+ARG NPM_REGISTRY=
+ARG RUN_TESTS=true
+WORKDIR /src
+COPY package.json package-lock.json .npmrc ./
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
+ && npm ci --no-audit --no-fund
+COPY . .
+RUN if [ "$RUN_TESTS" = "true" ]; then npm run typecheck && npm run lint && npm run test:ci; fi \
+ && npm run build
+
+FROM ${GO_IMAGE} AS backend
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG RUN_TESTS=true
+ENV GOPROXY=${GOPROXY} GOTOOLCHAIN=local
+WORKDIR /src
+COPY . .
+COPY --from=frontend /src/dist ./dist
+RUN if [ "$RUN_TESTS" = "true" ]; then \
+      go vet ./... && go test ./pkg/... \
+      && if [ ! -d vendor ]; then (cd third_party/go-sql-driver-mysql && go test -run TestAuth .); fi; \
+    fi \
+ && ./scripts/build-backend.sh \
+ && ./scripts/package.sh \
+ && ./scripts/verify-package.sh
+
+FROM scratch AS artifact
+COPY --from=backend /src/package/ /

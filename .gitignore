@@ -33,7 +33,6 @@ coverage
 dist/
 artifacts/
 work/
-ci/
 
 # e2e test directories
 /test-results/
@@ -51,3 +50,6 @@ ci/
 dev/jwt/
 dev/e2e/.cookies
 package/
+vendor/
+npm-cache/
+offline-bundle/

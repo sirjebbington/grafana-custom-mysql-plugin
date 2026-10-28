@@ -1,0 +1,10 @@
+# keep the build context small and free of local state; vendor/ is intentionally NOT ignored
+node_modules
+dist
+package
+offline-bundle
+npm-cache
+dev/jwt
+dev/e2e/.cookies
+.git
+.eslintcache

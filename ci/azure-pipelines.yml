@@ -1,0 +1,103 @@
+# DRAFT: native build on an Azure DevOps Linux agent that has Go and Node.js, or can install them from mirrors.
+# Produces package/<id>-<version>.zip, verifies it, publishes it as a pipeline artifact and, optionally, as a
+# Universal Package in the "Observability" feed, where pipelines/grafana-plugin-upload.yml
+# (obser-aws-deploy-config) picks it up.
+#
+# Read docs/BUILD_PIPELINE_GUIDE.md before adapting. Things to align with the org:
+#  - agent pool, and whether the shared templates in "Builder Tools/cicd-templates" must be used
+#  - Go/npm mirrors (GOPROXY, npm registry) reachable from the agents
+#  - the Universal Package name/version/zip naming that grafana-plugin-upload.yml expects
+trigger: none
+
+parameters:
+  - name: publish
+    displayName: Publish the package to the Observability feed
+    type: boolean
+    default: false
+  - name: sign
+    displayName: Sign the plugin (needs the GRAFANA_ACCESS_POLICY_TOKEN secret variable)
+    type: boolean
+    default: false
+
+pool:
+  name: OnPremUnix # confirm: the pool family used by grafana-plugin-upload.yml
+
+variables:
+  pluginId: kotak-starrocks-datasource
+  GOTOOLCHAIN: local
+  # GOPROXY: https://<go-mirror>            # if agents cannot reach proxy.golang.org
+  # npm_config_registry: https://<npm-mirror>/
+  # root URLs for a private signature; must match grafana.ini server.root_url in each env
+  signRootUrls: https://dev.observability.kotak.internal/,https://uat.observability.kotak.internal/,https://prod.observability.kotak.internal/
+
+steps:
+  - checkout: self
+
+  # Remove these two tasks if the agents already have Go >= 1.24.3 and Node.js 22 installed
+  - task: GoTool@0
+    inputs:
+      version: '1.25.0'
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '22.x'
+
+  - script: |
+      set -euo pipefail
+      v=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n1)
+      echo "plugin version $v"
+      echo "##vso[task.setvariable variable=pluginVersion]$v"
+    displayName: Read plugin version
+
+  - script: npm ci --no-audit --no-fund
+    displayName: Install npm dependencies
+
+  - script: |
+      set -euo pipefail
+      npm run typecheck
+      npm run lint
+      npm run test:ci
+    displayName: Frontend typecheck, lint, tests
+
+  - script: |
+      set -euo pipefail
+      go vet ./...
+      go test ./pkg/...
+      # the patched driver is its own module; its auth tests need no database
+      (cd third_party/go-sql-driver-mysql && go test -run 'TestAuth' .)
+    displayName: Backend tests
+
+  - script: |
+      set -euo pipefail
+      npm run build                 # frontend → dist/
+      ./scripts/build-backend.sh    # dist/gpx_kotak_starrocks_linux_{amd64,arm64}; same flags as mage build:linux
+    displayName: Build
+
+  - script: npx --yes @grafana/sign-plugin@latest --rootUrls "$(signRootUrls)"
+    displayName: Sign plugin (private signature)
+    condition: and(succeeded(), eq('${{ parameters.sign }}', true))
+    env:
+      GRAFANA_ACCESS_POLICY_TOKEN: $(GRAFANA_ACCESS_POLICY_TOKEN)
+
+  - script: |
+      set -euo pipefail
+      ./scripts/package.sh
+      ./scripts/verify-package.sh
+      mkdir -p "$(Build.ArtifactStagingDirectory)/package"
+      cp package/*.zip package/*.sha256 "$(Build.ArtifactStagingDirectory)/package/"
+    displayName: Package and verify
+
+  - publish: $(Build.ArtifactStagingDirectory)/package
+    artifact: plugin-zip
+
+  - task: UniversalPackages@0
+    displayName: Publish Universal Package
+    condition: and(succeeded(), eq('${{ parameters.publish }}', true))
+    inputs:
+      command: publish
+      publishDirectory: $(Build.ArtifactStagingDirectory)/package
+      feedsToUsePublish: internal
+      vstsFeedPublish: Observability
+      vstsFeedPackagePublish: $(pluginId) # confirm against grafana-plugin-upload.yml naming
+      versionOption: custom
+      versionPublish: $(pluginVersion)
+      packagePublishDescription: StarRocks datasource forwarding the user's IDAM JWT
