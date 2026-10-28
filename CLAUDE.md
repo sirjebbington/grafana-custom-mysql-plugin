@@ -8,6 +8,8 @@ Before doing anything, read:
    through `obser-aws-deploy-config`.
 2. `docs/QUESTIONS.md`: open dependencies on the IDAM and StarRocks teams. Do not guess those values.
 3. `.config/AGENTS/instructions.md`: generic Grafana plugin rules. Do not edit `.config/`.
+4. `docs/research/` (optional): design history and evidence. `06-starrocks-jwt-auth-source-analysis.md`
+   explains why the driver is patched.
 
 Quick commands:
 - `npm ci && npm run typecheck && npm run lint && npm run test:ci`

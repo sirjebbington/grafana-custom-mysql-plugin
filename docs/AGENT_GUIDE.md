@@ -4,7 +4,8 @@ This document is written for an AI coding agent, such as Claude Code, working in
 repositories. A human engineer can follow it too. It covers what this plugin is, what is already built and
 verified, how to build and test it, and how to deploy it through `obser-aws-deploy-config`.
 
-Read sections 0 to 2 before changing anything.
+Read sections 0 to 2 before changing anything. The design history, the StarRocks protocol analysis
+(`docs/research/06-…`) and the raw test evidence are in `docs/research/`.
 
 ---
 

@@ -59,7 +59,10 @@ Browser ──(Grafana session)──▶ Grafana ──QueryData + X-Id-Token / 
 | Allow plaintext | `allowPlaintext` | off | No TLS at all. Local container only |
 | Session timezone | `timezone` | — | `SET time_zone` per connection |
 
-See `docs/AGENT_GUIDE.md` for build, test and deployment steps.
+Documentation:
+- `docs/AGENT_GUIDE.md`: build, test and deployment steps.
+- `docs/QUESTIONS.md`: open questions for the IDAM and StarRocks teams.
+- `docs/research/`: how the design was reached, including the StarRocks JWT protocol analysis, Grafana internals and test evidence.
 
 ## License
 
