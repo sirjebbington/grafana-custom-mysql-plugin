@@ -1,0 +1,22 @@
+{
+  "interactiveLogin": false,
+  "httpServer": "NettyWrapper",
+  "tokenCallbacks": [
+    {
+      "issuerId": "idam",
+      "tokenExpiry": 120,
+      "requestMappings": [
+        {
+          "requestParam": "grant_type",
+          "match": "*",
+          "claims": {
+            "sub": "kmbl3e2e",
+            "user_name": "KMBL3E2E",
+            "email": "kmbl3e2e@kotak.com",
+            "aud": ["grafana-e2e"]
+          }
+        }
+      ]
+    }
+  ]
+}

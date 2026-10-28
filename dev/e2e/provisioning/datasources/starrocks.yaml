@@ -1,0 +1,17 @@
+apiVersion: 1
+datasources:
+  - name: starrocks-idam-e2e
+    uid: e2e-ds-kotak-starrocks-public
+    type: kotak-starrocks-datasource
+    access: proxy
+    orgId: 1
+    url: starrocks:9030
+    editable: true
+    jsonData:
+      oauthPassThru: true
+      tokenSource: id_token
+      usernameClaim: sub
+      maxConnsPerUser: 5
+      connMaxIdleSeconds: 60
+      # the local StarRocks container has no TLS; never set this in a real environment
+      allowPlaintext: true

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "datasource",
+  "name": "StarRocks (IDAM identity)",
+  "id": "kotak-starrocks-datasource",
+  "executable": "gpx_kotak_starrocks",
+  "category": "sql",
+  "info": {
+    "description": "StarRocks over the MySQL protocol. Queries run as the signed-in Grafana user by forwarding their IDAM JWT, so StarRocks and Ranger enforce per-user access.",
+    "author": {
+      "name": "Kotak Observability"
+    },
+    "keywords": ["starrocks", "mysql", "sql", "jwt", "idam", "ranger"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [],
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=12.0.0",
+    "plugins": []
+  },
+  "alerting": false,
+  "annotations": true,
+  "metrics": true,
+  "backend": true,
+  "queryOptions": {
+    "minInterval": true
+  }
+}

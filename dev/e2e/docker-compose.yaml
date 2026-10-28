@@ -1,0 +1,57 @@
+# Local end-to-end environment: Grafana 12.0.1-security-01 (the image the org wraps), a mock OIDC provider
+# standing in for IDAM, and StarRocks 4.0.10 with JWT security integrations. Driven by scripts/e2e.sh.
+name: kotak-starrocks-e2e
+
+services:
+  starrocks:
+    image: starrocks/allin1-ubuntu:4.0.10
+    ports:
+      - "19030:9030" # MySQL protocol, used by the Go integration test
+      - "18030:8030"
+    volumes:
+      # JWKS for tools/devjwt tokens (security integration local_jwt)
+      - ../jwt/jwks.json:/data/deploy/starrocks/fe/conf/jwks.json:ro
+
+  idam:
+    # issues RS256 JWTs; issuer is http://idam:8080/idam when called from inside the network
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    ports:
+      - "18080:8080"
+    environment:
+      JSON_CONFIG_PATH: /config/mock-idam.json
+    volumes:
+      - ./mock-idam.json:/config/mock-idam.json:ro
+
+  grafana:
+    image: grafana/grafana-oss:12.0.1-security-01
+    ports:
+      - "13000:3000"
+    depends_on:
+      - idam
+      - starrocks
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:13000/
+      GF_LOG_LEVEL: info
+      GF_LOG_FILTERS: plugin.kotak-starrocks-datasource:debug
+      GF_PATHS_PLUGINS: /grafana/plugins
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: kotak-starrocks-datasource
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true"
+      GF_FEATURE_TOGGLES_ENABLE: accessTokenExpirationCheck
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_NAME: IDAM
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: grafana-e2e
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: e2e-secret
+      GF_AUTH_GENERIC_OAUTH_SCOPES: openid email profile offline_access
+      # the browser (curl on the host) is sent here; Grafana itself calls the token and userinfo URLs
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: http://localhost:18080/idam/authorize
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: http://idam:8080/idam/token
+      GF_AUTH_GENERIC_OAUTH_API_URL: http://idam:8080/idam/userinfo
+      GF_AUTH_GENERIC_OAUTH_AUTH_STYLE: InParams
+      GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH: sub
+      GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH: email
+      GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "'Admin'"
+      GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP: "true"
+      GF_AUTH_GENERIC_OAUTH_USE_REFRESH_TOKEN: "true"
+    volumes:
+      - ../../dist:/grafana/plugins/kotak-starrocks-datasource:ro
+      - ./provisioning:/etc/grafana/provisioning:ro
