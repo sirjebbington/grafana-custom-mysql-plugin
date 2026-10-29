@@ -10,7 +10,9 @@ Before doing anything, read:
    - `docs/BUILD_PIPELINE_GUIDE.md`: read this instead of §4 and §9 of the agent guide when the task is
      build pipelines or offline builds.
 3. `.config/AGENTS/instructions.md`: generic Grafana plugin rules. Do not edit `.config/`.
-4. `docs/research/` (optional): design history and evidence. `06-starrocks-jwt-auth-source-analysis.md`
+4. `docs/IMPLEMENTATION_EXPLAINED.md`: how the whole system works, bottom to top, the UAT status and an
+   error-to-owner troubleshooting table. Update its §0 and §13 when the status changes.
+5. `docs/research/` (optional): design history and evidence. `06-starrocks-jwt-auth-source-analysis.md`
    explains why the driver is patched.
 
 Quick commands:

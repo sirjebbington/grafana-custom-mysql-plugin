@@ -60,6 +60,8 @@ Browser ──(Grafana session)──▶ Grafana ──QueryData + X-Id-Token / 
 | Session timezone | `timezone` | — | `SET time_zone` per connection |
 
 Documentation:
+- `docs/IMPLEMENTATION_EXPLAINED.md`: what was built and how it works, bottom to top, with diagrams, UAT status and troubleshooting.
+- `docs/MANAGEMENT_BRIEF.md`: a short brief for TLT and management: why, status, owners, risks, decisions needed and an FAQ.
 - `docs/AGENT_GUIDE.md`: build, test and deployment steps.
 - `docs/BUILD_PIPELINE_GUIDE.md`: build anatomy, offline/air-gapped and Docker builds, and pipeline preparation.
 - `docs/QUESTIONS.md`: open questions for the IDAM and StarRocks teams.

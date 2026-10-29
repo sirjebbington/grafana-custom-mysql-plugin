@@ -138,7 +138,7 @@ kotak-starrocks-datasource/
    for `authentication_openid_connect_client`. The patched driver answers with `[0x01][lenenc JWT]`
    (`third_party/go-sql-driver-mysql/auth.go`, `[kotak patch]`). StarRocks verifies the JWT and the session
    runs as the username.
-6. Errors: StarRocks auth failures (5208) and privilege failures (5203, or any message containing
+6. Errors: StarRocks auth failures (5208) and privilege failures (5204 from Ranger, 5203 from StarRocks' own RBAC, or any message containing
    "access denied") are passed through to the user (`mysql.go` `TransformQueryError`). Other server errors keep
    upstream's generic message, and network errors are logged and hidden.
 
@@ -553,7 +553,8 @@ In the browser, signed in through IDAM as a UAT test user who has a Ranger polic
    `Connected to StarRocks as '<user>'@'<ip>' using the IDAM id_token (claim sub=<user>, token expires in …)`.
 2. **Explore**: `SELECT CURRENT_USER()` returns the test user.
 3. Query a table the user **is** allowed to read: rows come back.
-4. Query a table the user is **not** allowed to read: `Error 5203 … Access denied …`, shown as is.
+4. Query a table the user is **not** allowed to read: `Error 5204 … Access denied …` (Ranger; 5203 on a catalog
+   without Ranger), shown as is.
 5. Ask the StarRocks team to confirm the audit log shows the human user, not `logsro-app-*`.
 6. Leave the session open for more than 60 minutes, then run a query. It must still work, which proves IDAM
    returns a fresh ID token on refresh (QUESTIONS I5). If it fails with "the IDAM token has expired", I5 is
@@ -584,7 +585,7 @@ In the browser, signed in through IDAM as a UAT test user who has a Ranger polic
 | `Error 5208 … Login name X is not matched to user Y` | `usernameClaim` ≠ StarRocks `principal_field` | Align them (S1) |
 | `Error 5208 … Can not get specified principal …` | The token lacks the `principal_field` claim | Check the claim name |
 | `Error 5208 …` mentioning `PKIX`, `SSLHandshake`, `UnknownHost`, `Connection refused` | The FE cannot fetch the JWKS: egress, DNS, or the CA missing from the JVM truststore | StarRocks team (S4) |
-| `Error 5203 … Access denied; you need … privilege(s)` | Ranger or StarRocks has no grant for this user | Add the user, in the right case, to a Ranger role (S5, S6) |
+| `Error 5204 … Access denied; you need … privilege(s)` (`5203` without Ranger) | Login succeeded; Ranger (5204) or StarRocks RBAC (5203) has no grant for this user. `ANY privilege(s) on DATABASE <db>` comes from the datasource's default database, which is checked at login, so even Save & test fails until the user holds a privilege in that database | Add the user, in the right case, to a Ranger role (S5, S6). See `IMPLEMENTATION_EXPLAINED.md` §0 |
 | `x509: certificate signed by unknown authority` | The CA bundle lacks the StarRocks issuer | §10.3 |
 | `x509: certificate is valid for A, not B` | `serverName`/host not in the certificate SAN | Set `serverName` to a SAN entry (S7) |
 | `failed to connect to server - please inspect Grafana server log …` | Network error (DNS, NLB, security group). The detail is in the Grafana log | `kubectl logs … -c grafana`, look for `Query error` |

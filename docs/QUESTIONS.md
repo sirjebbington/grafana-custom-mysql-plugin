@@ -38,7 +38,8 @@ StarRocks 4.0.10 source.
 6. A JWKS URL that does not start with `http(s)://` is read as a file under `fe/conf/`.
 7. A failed login returns MySQL error **5208** with the reason, e.g.
    `Access denied; No authentication was successful in the authentication chain : [<integration>: Audience (aud) field [...] is invalid]`.
-   A missing privilege returns error **5203**. The plugin shows both to the user.
+   A missing privilege returns error **5204** when Ranger is the access controller (**5203** with StarRocks'
+   own RBAC). The plugin shows both to the user.
 
 ---
 
@@ -188,7 +189,7 @@ not.
 *Need:* acknowledgement, or a session lifetime limit on the StarRocks side.
 
 **S11. Which error messages should users see?**
-The plugin passes StarRocks auth (5208) and privilege (5203) messages through to the user.
+The plugin passes StarRocks auth (5208) and privilege (5204 with Ranger, 5203 without) messages through to the user.
 *Need:* confirmation that these messages are acceptable to show. They can include the integration name and the
 audience value.
 
