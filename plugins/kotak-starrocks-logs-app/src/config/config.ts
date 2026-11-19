@@ -29,10 +29,24 @@ export interface TenantConfig {
   patterns?: PatternConfig[];
 }
 
+/** One StarRocks data source (one database) offered in the app's data source picker. */
+export interface DatasourceEntry {
+  uid: string;
+  /** views of this data source are named <viewPrefix><app_id>; default: the top-level viewPrefix */
+  viewPrefix?: string;
+}
+
 /** jsonData of the app (provisioned through provisioning/plugins or edited on the configuration page). */
 export interface AppJsonData {
+  /** the data source selected by default */
   datasourceUid?: string;
   datasourceType?: string;
+  /**
+   * Data sources offered in the picker, in this order (uids, or {uid, viewPrefix}). Each
+   * kotak-starrocks-datasource instance is scoped to one database. Default: every instance of
+   * datasourceType that the user can see.
+   */
+  datasources?: Array<string | DatasourceEntry>;
   viewPrefix?: string;
   serviceLabel?: string;
   defaultTimeRange?: string;
@@ -40,7 +54,10 @@ export interface AppJsonData {
   lineLimit?: number;
   labels?: string[];
   fields?: string[];
-  /** keyed by app_id (the view name without the prefix); "default" applies to every tenant */
+  /**
+   * keyed by app_id (the view name without the prefix), or <datasourceUid>/<app_id> for settings that only
+   * apply in one data source; "default" applies to every tenant
+   */
   tenants?: Record<string, TenantConfig>;
 }
 
@@ -52,7 +69,10 @@ export interface ResolvedTenant {
 }
 
 export interface ResolvedConfig {
+  /** default data source and the plugin type of all data sources the app uses */
   datasource: { uid: string; type: string };
+  /** explicit list for the picker; empty = every instance of datasource.type */
+  datasources: DatasourceEntry[];
   viewPrefix: string;
   serviceLabel: string;
   defaultTimeRange: string;
@@ -65,6 +85,7 @@ export interface ResolvedConfig {
 
 export const DEFAULT_CONFIG: ResolvedConfig = {
   datasource: { uid: 'app-logs-starrocks-db', type: 'kotak-starrocks-datasource' },
+  datasources: [],
   viewPrefix: 'vw_eks_app_logs_',
   serviceLabel: 'k8s_service_name',
   defaultTimeRange: 'now-15m',
@@ -77,6 +98,9 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PREFIX = /^[A-Za-z0-9_]+$/;
+const DS_UID = /^[A-Za-z0-9._-]{1,128}$/;
+// app_id, or <datasourceUid>/<app_id>
+const TENANT_KEY = /^(?:[A-Za-z0-9._-]{1,128}\/)?[A-Za-z0-9_]+$/;
 
 export function isIdentifier(s: unknown): s is string {
   return typeof s === 'string' && IDENT.test(s);
@@ -109,7 +133,7 @@ function asList(v: string | string[] | undefined): string[] {
 export function resolveConfig(jsonData?: AppJsonData | null): { config: ResolvedConfig; errors: string[] } {
   const j = jsonData ?? {};
   const errors: string[] = [];
-  const c: ResolvedConfig = { ...DEFAULT_CONFIG, tenants: {} };
+  const c: ResolvedConfig = { ...DEFAULT_CONFIG, datasources: [], tenants: {} };
 
   if (j.datasourceUid !== undefined) {
     if (typeof j.datasourceUid === 'string' && j.datasourceUid.trim() !== '') {
@@ -120,6 +144,34 @@ export function resolveConfig(jsonData?: AppJsonData | null): { config: Resolved
   }
   if (typeof j.datasourceType === 'string' && j.datasourceType.trim() !== '') {
     c.datasource = { ...c.datasource, type: j.datasourceType.trim() };
+  }
+  if (j.datasources !== undefined) {
+    if (!Array.isArray(j.datasources)) {
+      errors.push('datasources must be a list of data source uids');
+    } else {
+      for (const d of j.datasources) {
+        const entry: DatasourceEntry | undefined =
+          typeof d === 'string' ? { uid: d } : d && typeof d === 'object' && typeof d.uid === 'string' ? d : undefined;
+        if (!entry || !DS_UID.test(entry.uid)) {
+          errors.push(`datasources: ${JSON.stringify(d)} is not a data source uid`);
+          continue;
+        }
+        if (
+          entry.viewPrefix !== undefined &&
+          !(typeof entry.viewPrefix === 'string' && PREFIX.test(entry.viewPrefix))
+        ) {
+          errors.push(
+            `datasources.${entry.uid}.viewPrefix "${entry.viewPrefix}" may only contain letters, digits and _`
+          );
+          continue;
+        }
+        if (c.datasources.some((x) => x.uid === entry.uid)) {
+          errors.push(`datasources: "${entry.uid}" is listed twice`);
+          continue;
+        }
+        c.datasources.push(entry.viewPrefix ? { uid: entry.uid, viewPrefix: entry.viewPrefix } : { uid: entry.uid });
+      }
+    }
   }
   if (j.viewPrefix !== undefined) {
     if (typeof j.viewPrefix === 'string' && PREFIX.test(j.viewPrefix)) {
@@ -174,8 +226,8 @@ export function resolveConfig(jsonData?: AppJsonData | null): { config: Resolved
   }
 
   for (const [key, t] of Object.entries(j.tenants ?? {})) {
-    if (key !== 'default' && !PREFIX.test(key)) {
-      errors.push(`tenants: "${key}" is not an app_id`);
+    if (key !== 'default' && !TENANT_KEY.test(key)) {
+      errors.push(`tenants: "${key}" is not an app_id or <datasourceUid>/<app_id>`);
       continue;
     }
     c.tenants[key] = validateTenant(key, t ?? {}, errors);
@@ -245,12 +297,21 @@ export function tenantKeyForView(view: string, prefix: string): string {
   return view.startsWith(prefix) ? view.slice(prefix.length) : view;
 }
 
-/** Merges the "default" tenant with the view's tenant. */
-export function resolveTenant(config: ResolvedConfig, view: string): ResolvedTenant {
-  const key = tenantKeyForView(view, config.viewPrefix);
+/** View name prefix of a data source (its own, or the top-level viewPrefix). */
+export function viewPrefixFor(config: ResolvedConfig, datasourceUid?: string): string {
+  return config.datasources.find((d) => d.uid === datasourceUid)?.viewPrefix ?? config.viewPrefix;
+}
+
+/**
+ * Settings for a view: each field comes from tenants["<datasourceUid>/<app_id>"], then tenants["<app_id>"],
+ * then tenants.default.
+ */
+export function resolveTenant(config: ResolvedConfig, view: string, datasourceUid?: string): ResolvedTenant {
+  const key = tenantKeyForView(view, viewPrefixFor(config, datasourceUid));
   const d = config.tenants.default ?? {};
   const t = config.tenants[key] ?? {};
-  const level = t.level ?? d.level ?? { source: 'column' };
+  const s = (datasourceUid && config.tenants[`${datasourceUid}/${key}`]) || {};
+  const level = s.level ?? t.level ?? d.level ?? { source: 'column' };
   const regex = level.source === 'message' ? asList(level.regex) : [];
   return {
     key,
@@ -258,8 +319,8 @@ export function resolveTenant(config: ResolvedConfig, view: string): ResolvedTen
       source: level.source,
       regex: level.source === 'message' && regex.length === 0 ? DEFAULT_MESSAGE_LEVEL_REGEX : regex,
     },
-    trace: t.trace ?? d.trace,
-    patterns: t.patterns ?? d.patterns ?? [],
+    trace: s.trace ?? t.trace ?? d.trace,
+    patterns: s.patterns ?? t.patterns ?? d.patterns ?? [],
   };
 }
 

@@ -32,6 +32,15 @@ python3 scripts/gen-tenants-from-loki.py envs/<env>/grafana-values.yml \
 (observability), trace regexes for tenants without a Loki derived field, and patterns. Run it in the
 deploy-config pipeline (or as a check that fails when the committed file differs) so the two never drift.
 
+## Adding another StarRocks database
+
+1. StarRocks/Ranger: the database has its `vw_eks_app_logs_<app_id>` views and per-view Ranger policies.
+2. deploy-config: add a second `kotak-starrocks-datasource` entry in the same org(s), same settings as the
+   existing one except `name`, `uid` and `jsonData.database`. Nothing else changes for the data source plugin.
+3. The app shows it in its Data source picker automatically. To fix the list and order, add `datasources`
+   (or re-run the generator with `--pin-datasources`). Add `<datasourceUid>/<app_id>` tenant entries only if a
+   tenant needs different settings in that database (for example a different level source).
+
 ## 1. Build and upload
 
 1. Build: `npm ci && npm run typecheck && npm run lint && npm run test:ci && npm run build &&

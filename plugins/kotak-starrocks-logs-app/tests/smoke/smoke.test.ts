@@ -22,6 +22,9 @@ import { emptySpec, QuerySpec } from '../../src/state/types';
 
 const GRAFANA = process.env.GRAFANA_URL ?? 'http://localhost:23000';
 const DS = { uid: 'e2e-ds-starrocks-logs', type: 'kotak-starrocks-datasource' };
+// second StarRocks database = second instance of the data source plugin
+const DS2 = { uid: 'e2e-ds-starrocks-logs2', type: 'kotak-starrocks-datasource' };
+const PAYMENTS = 'vw_eks_app_logs_app_04000_payments';
 const OBS = 'vw_eks_app_logs_app_1961_observability';
 const CMM = 'vw_eks_app_logs_app_01996_frontlineplatforms_cmm';
 const DPDPA = 'vw_eks_app_logs_app_03123_dpdpa';
@@ -40,6 +43,8 @@ const JSON_DATA: AppJsonData = {
         { name: 'Health check', like: '%/healthz%' },
       ],
     },
+    // only in the second database: there the observability view has the level column filled
+    'e2e-ds-starrocks-logs2/app_1961_observability': { level: { source: 'column' } },
   },
 };
 
@@ -77,14 +82,14 @@ class Session {
   }
 
   /** Runs SQL as this user; returns rows as objects, or throws with the datasource error. */
-  async sql(rawSql: string, from = 'now-6h', to = 'now'): Promise<Array<Record<string, unknown>>> {
+  async sql(rawSql: string, from = 'now-6h', to = 'now', ds = DS): Promise<Array<Record<string, unknown>>> {
     const res = await fetch(`${GRAFANA}/api/ds/query`, {
       method: 'POST',
       headers: { cookie: this.header(), 'content-type': 'application/json' },
       body: JSON.stringify({
         from,
         to,
-        queries: [{ refId: 'A', datasource: DS, rawSql, format: 'table', rawQuery: true }],
+        queries: [{ refId: 'A', datasource: ds, rawSql, format: 'table', rawQuery: true }],
       }),
     });
     const body = await res.json();
@@ -113,13 +118,18 @@ const COLUMNS = [
   ...DEFAULT_FIELDS,
 ];
 
-function ctx(view: string): BuildContext {
+function ctx(view: string, ds = DS): BuildContext {
   const { config } = resolveConfig(JSON_DATA);
-  return { tenant: resolveTenant(config, view), columns: COLUMNS, labels: DEFAULT_LABELS, fields: DEFAULT_FIELDS };
+  return {
+    tenant: resolveTenant(config, view, ds.uid),
+    columns: COLUMNS,
+    labels: DEFAULT_LABELS,
+    fields: DEFAULT_FIELDS,
+  };
 }
 
-function spec(view: string, p: Partial<QuerySpec> = {}): QuerySpec {
-  return { ...emptySpec(view), ...p };
+function spec(view: string, p: Partial<QuerySpec> = {}, ds = DS): QuerySpec {
+  return { ...emptySpec(view, ds.uid), ...p };
 }
 
 const e2e = new Session('kmbl3e2e');
@@ -315,5 +325,37 @@ describe('level column tenant (cmm)', () => {
     const rows = await e2e.sql(volumeQuery(spec(CMM), ctx(CMM), 3600));
     const levels = new Set(rows.map((r) => r.g));
     expect(levels).toEqual(new Set(['error', 'warn', 'info', 'debug', 'unknown']));
+  });
+});
+
+describe('a second StarRocks database through a second data source instance', () => {
+  it('kmbl3e2e sees the views of the second database there', async () => {
+    const rows = await e2e.sql(viewsQuery('vw_eks_app_logs_'), 'now-6h', 'now', DS2);
+    expect(rows.map((r) => Object.values(r)[0]).sort()).toEqual([PAYMENTS, OBS]);
+  });
+
+  it('the same view name in another database is different data', async () => {
+    const rows = await e2e.sql(
+      serviceVolumeQuery(spec(OBS, {}, DS2), ctx(OBS, DS2), 'k8s_service_name', 3600),
+      'now-6h',
+      'now',
+      DS2
+    );
+    expect(new Set(rows.map((r) => r.v))).toEqual(new Set(['archive-compactor', 'cold-reader']));
+  });
+
+  it('per-database tenant settings: level from the column in db2, from the message in db1', async () => {
+    expect(ctx(OBS, DS2).tenant.level.source).toBe('column');
+    expect(ctx(OBS, DS).tenant.level.source).toBe('message');
+    const rows = await e2e.sql(volumeQuery(spec(OBS, {}, DS2), ctx(OBS, DS2), 3600), 'now-6h', 'now', DS2);
+    expect(new Set(rows.map((r) => r.g))).toEqual(new Set(['error', 'warn', 'info']));
+  });
+
+  it('a user granted only in db2 is refused by db1 and sees only their view in db2', async () => {
+    const db2only = new Session('kmbl3db2only');
+    await db2only.login();
+    await expect(db2only.sql(viewsQuery('vw_eks_app_logs_'))).rejects.toThrow(/invalid connection|denied|privilege/i);
+    const rows = await db2only.sql(viewsQuery('vw_eks_app_logs_'), 'now-6h', 'now', DS2);
+    expect(rows.map((r) => Object.values(r)[0])).toEqual([PAYMENTS]);
   });
 });

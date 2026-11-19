@@ -6,13 +6,15 @@ to `/api/ds/query` addressed to that datasource, which forwards the user's IDAM 
 
 Read first: `README.md` (features, config), `docs/DESIGN.md` (constraints, SQL per feature, guardrails),
 `docs/ROLLOUT.md` (deploy-config changes), `docs/MONOREPO.md` (same repo/pipelines as the datasource),
-`docs/ORG_AGENT_PROMPT.md` (step-by-step org rollout).
+`docs/ORG_AGENT_PROMPT.md` (step-by-step org rollout), `docs/ORG_AGENT_PROMPT_2_DATASOURCE_PICKER.md` (edit 2).
 
 Rules:
 - All SQL goes through `src/sql/builder.ts`: identifiers via `quoteIdent`, values via `lit` (it splits `$`
   out of literals because the datasource expands macros everywhere). Substring search uses `containsCond`
   (LIKE, or `instr()` when the text has `%`, `_` or `\`: StarRocks 4.0 LIKE-escape bug).
 - Never use information_schema / DESCRIBE / SHOW COLUMNS (Ranger denies them).
+- Every query targets the data source in `QuerySpec.datasource` (one kotak-starrocks-datasource instance per
+  StarRocks database); pass it to `runSql` / `fetchViews` / `fetchColumns` / `buildContext`.
 - Grafana 12.0.1: keep `@grafana/*` at 12.0.1 and `@grafana/scenes` at 6.20.2 (6.21+ needs `@grafana/i18n`).
 - Do not edit `.config/` (scaffolded). Never print tokens.
 

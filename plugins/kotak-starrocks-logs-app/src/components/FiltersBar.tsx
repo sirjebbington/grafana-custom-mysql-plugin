@@ -93,7 +93,8 @@ function AddFilter({ model }: { model: LogsExploration }) {
     const frames = await runSqlOnce(
       labelValuesQuery(model.getSpec(), ctx, key, 200),
       sceneGraph.getTimeRange(model).state.value,
-      'values'
+      'values',
+      model.getSpec().datasource
     );
     const values = stringColumn(frames[0], 'v');
     const counts = stringColumn(frames[0], 'c');

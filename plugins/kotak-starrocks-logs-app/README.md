@@ -7,7 +7,7 @@ Ranger decide what each person sees, exactly as for dashboards.
 
 | Logs Drilldown feature | Here |
 |---|---|
-| Data source picker | **View picker**: `SHOW TABLES LIKE 'vw_eks_app_logs_%'`, filtered by Ranger |
+| Data source picker | **Data source picker** (one `kotak-starrocks-datasource` instance per StarRocks database) **+ view picker** (`SHOW TABLES LIKE 'vw_eks_app_logs_%'`, filtered by Ranger) |
 | Service grid (volume + newest lines per service), search, label tabs | Yes: one `GROUP BY` for all volumes, one `UNION ALL` for the visible page's lines |
 | Logs tab: volume by level, lines, newest/oldest, wrap, line limit | Yes (Grafana's Logs panel) |
 | Logs / Table / JSON views | Yes |
@@ -49,7 +49,8 @@ Screenshots from the end-to-end run (synthetic data): [service grid](docs/screen
 
 More in [docs/DESIGN.md](docs/DESIGN.md). Rollout in [docs/ROLLOUT.md](docs/ROLLOUT.md). Building it from the
 same repository and pipelines as the datasource: [docs/MONOREPO.md](docs/MONOREPO.md). Step-by-step rollout for
-the Claude session on the org PC: [docs/ORG_AGENT_PROMPT.md](docs/ORG_AGENT_PROMPT.md).
+the Claude session on the org PC: [docs/ORG_AGENT_PROMPT.md](docs/ORG_AGENT_PROMPT.md) (0.1.0), then
+[docs/ORG_AGENT_PROMPT_2_DATASOURCE_PICKER.md](docs/ORG_AGENT_PROMPT_2_DATASOURCE_PICKER.md) (0.2.0, data source picker).
 
 ## Configuration (app jsonData)
 
@@ -64,13 +65,16 @@ apps:
   - type: kotak-starrocks-logs-app
     org_id: 3
     jsonData:
-      datasourceUid: app-logs-starrocks-db      # the kotak-starrocks-datasource instance to use
+      datasourceUid: app-logs-starrocks-db      # data source selected by default
+      # datasources: [app-logs-starrocks-db, { uid: app-logs-starrocks-db2, viewPrefix: vw_eks_app_logs_ }]
+      #   optional picker allowlist/order; default: every kotak-starrocks-datasource instance in the org
       viewPrefix: vw_eks_app_logs_
       defaultTimeRange: now-15m
       maxScanHours: 6                           # text scans over longer ranges ask first
       lineLimit: 1000
       # labels / fields: optional column lists (defaults: k8s_* and friends)
-      tenants:                                  # keyed by app_id = view name without the prefix
+      tenants:                                  # keyed by app_id = view name without the prefix,
+                                                # or <datasourceUid>/<app_id> for one database only
         default:
           level: { source: column }             # read the level column (normalised)
         app_1961_observability:
@@ -83,6 +87,10 @@ apps:
 
 - `level.regex` (message source, optional): RE2 regexes tried in order; the first capture group is the level.
   The defaults handle `level=info`, `"level":"info"`, bare `ERROR`/`WARN`/… and glog `E1118 …` prefixes.
+- Several StarRocks databases: add one `kotak-starrocks-datasource` instance per database (each has its own
+  `database` setting); they appear in the app's Data source picker. Views, columns and filters belong to the
+  selected data source (URL key `ds`). Without an explicit choice the app opens `datasourceUid`, or the next
+  data source where the user can see views.
 - `patterns[].like` is a SQL LIKE pattern (`%` wildcard). Prefer `regex` when the text itself contains `%`,
   `_` or `\` (StarRocks 4.0 does not honour an escaped `\%` at the end of a LIKE pattern).
 
@@ -92,7 +100,7 @@ Node 22 and npm. No backend, no Go.
 
 ```bash
 npm ci
-npm run typecheck && npm run lint && npm run test:ci     # 45 unit tests
+npm run typecheck && npm run lint && npm run test:ci     # 51 unit tests
 npm run build                                             # → dist/
 ./scripts/package.sh && ./scripts/verify-package.sh       # → package/kotak-starrocks-logs-app-<version>.zip
 ```
@@ -101,18 +109,18 @@ npm run build                                             # → dist/
 
 `scripts/e2e.sh` runs Grafana 12.0.1-security-01 with this app and the **built, unchanged**
 `kotak-starrocks-datasource` (`DATASOURCE_DIST`, default `../kotak-starrocks-datasource/dist`, the sibling folder in this repository), a mock IDAM,
-and StarRocks 4.0.10 seeded with an `eks_app_logs`-shaped table, three tenant views and native JWT users
-with per-view grants (standing in for Ranger).
+and StarRocks 4.0.10 seeded with two databases (two data source instances), each with an `eks_app_logs`-shaped
+table and tenant views, and native JWT users with per-view grants (standing in for Ranger).
 
 ```bash
 npm run build
 ./scripts/e2e.sh up        # generates the app provisioning from dev/e2e/tenants/ (like deploy-config), seeds,
                            # Grafana http://localhost:23000 ("Sign in with IDAM", user e.g. kmbl3e2e)
-./scripts/e2e.sh smoke     # 16 API checks: every query kind on StarRocks, per-user views, escaping
-./scripts/e2e.sh test      # 17 browser tests (Playwright, in mcr.microsoft.com/playwright:v1.52.0-noble;
+./scripts/e2e.sh smoke     # 20 API checks: every query kind on StarRocks, per-user views, two databases, escaping
+./scripts/e2e.sh test      # 20 browser tests (Playwright, in mcr.microsoft.com/playwright:v1.52.0-noble;
                            # PLAYWRIGHT_LOCAL=1 runs them on the host if Chromium's libraries are installed)
 ./scripts/e2e.sh down
 ```
 
-Test users: `kmbl3e2e` (observability + cmm views), `kmbl3other` (dpdpa view), `kmbl3none` (no views),
-`kmbl3admin` (Grafana admin, observability view).
+Test users: `kmbl3e2e` (db1: observability + cmm; db2: observability + payments), `kmbl3other` (db1: dpdpa),
+`kmbl3db2only` (db2: payments), `kmbl3none` (no views), `kmbl3admin` (Grafana admin, db1: observability).

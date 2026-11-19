@@ -13,3 +13,6 @@ app_01996_frontlineplatforms_cmm:
   patterns:
     - { name: Order created, like: '%created order%' }
     - { name: Payment failed, regex: 'payment (declined|failed)' }
+# Only in the second database: the observability view there has the level column filled.
+e2e-ds-starrocks-logs2/app_1961_observability:
+  level: { source: column }

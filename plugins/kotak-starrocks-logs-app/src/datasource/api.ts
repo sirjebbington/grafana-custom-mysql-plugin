@@ -1,25 +1,63 @@
 import { Observable, catchError, firstValueFrom, map, of } from 'rxjs';
 
 import { DataFrame, DataQueryResponse, TimeRange } from '@grafana/data';
-import { BackendDataSourceResponse, FetchResponse, getBackendSrv, toDataQueryResponse } from '@grafana/runtime';
+import {
+  BackendDataSourceResponse,
+  FetchResponse,
+  getBackendSrv,
+  getDataSourceSrv,
+  toDataQueryResponse,
+} from '@grafana/runtime';
 
-import { getAppConfig } from '../config/config';
+import { getAppConfig, viewPrefixFor } from '../config/config';
 import { columnsQuery, viewsQuery } from '../sql/builder';
 
+export interface StarRocksDatasource {
+  uid: string;
+  name: string;
+}
+
 /**
- * Runs SQL through the configured kotak-starrocks-datasource via Grafana's /api/ds/query. Grafana's OAuth
+ * The kotak-starrocks-datasource instances offered in the picker: the configured list (in its order), or
+ * every instance of the plugin type the user can see. Each instance is scoped to one StarRocks database.
+ */
+export function listDatasources(): StarRocksDatasource[] {
+  const { datasource, datasources } = getAppConfig();
+  // pluginId, not type: Grafana 12.0 getList() appends "-- Grafana --" unless pluginId (or alerting) is set
+  const all = getDataSourceSrv()
+    .getList({ pluginId: datasource.type })
+    .filter((ds) => ds.type === datasource.type)
+    .map((ds) => ({ uid: ds.uid, name: ds.name }));
+  if (datasources.length === 0) {
+    return all.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return datasources
+    .map((d) => all.find((x) => x.uid === d.uid))
+    .filter((x): x is StarRocksDatasource => x !== undefined);
+}
+
+/**
+ * Runs SQL through a kotak-starrocks-datasource instance via Grafana's /api/ds/query. Grafana's OAuth
  * middleware attaches the signed-in user's IDAM token, so StarRocks and Ranger see the user, exactly as for
  * dashboard panels. The datasource's frontend is bypassed on purpose: the SQL is sent as built, without
  * template-variable interpolation.
  */
 export function runSql(
   sql: string,
-  opts: { refId: string; range: TimeRange; requestId?: string; maxDataPoints?: number; intervalMs?: number }
+  opts: {
+    /** data source uid; default: the configured default data source */
+    datasource?: string;
+    refId: string;
+    range: TimeRange;
+    requestId?: string;
+    maxDataPoints?: number;
+    intervalMs?: number;
+  }
 ): Observable<DataQueryResponse> {
   const { datasource } = getAppConfig();
   const query = {
     refId: opts.refId,
-    datasource,
+    datasource: { type: datasource.type, uid: opts.datasource || datasource.uid },
     rawSql: sql,
     format: 'table',
     rawQuery: true,
@@ -55,8 +93,13 @@ export function runSql(
   }
 }
 
-export async function runSqlOnce(sql: string, range: TimeRange, refId = 'A'): Promise<DataFrame[]> {
-  const res = await firstValueFrom(runSql(sql, { refId, range }));
+export async function runSqlOnce(
+  sql: string,
+  range: TimeRange,
+  refId = 'A',
+  datasource?: string
+): Promise<DataFrame[]> {
+  const res = await firstValueFrom(runSql(sql, { refId, range, datasource }));
   const err = res.errors?.[0] ?? res.error;
   if (err) {
     throw new Error(err.message ?? 'query failed');
@@ -87,10 +130,10 @@ export function stringColumn(frame: DataFrame | undefined, name?: string): strin
   return (field?.values ?? []).map((v) => (v === null || v === undefined ? '' : String(v)));
 }
 
-/** Views (vw_eks_app_logs_*) this user can see. SHOW TABLES is filtered by Ranger. */
-export async function fetchViews(range: TimeRange): Promise<string[]> {
-  const { viewPrefix } = getAppConfig();
-  const frames = await runSqlOnce(viewsQuery(viewPrefix), range, 'views');
+/** Views (vw_eks_app_logs_*) of a data source's database that this user can see (SHOW TABLES, Ranger-filtered). */
+export async function fetchViews(range: TimeRange, datasource?: string): Promise<string[]> {
+  const viewPrefix = viewPrefixFor(getAppConfig(), datasource);
+  const frames = await runSqlOnce(viewsQuery(viewPrefix), range, 'views', datasource);
   return stringColumn(frames[0])
     .filter((v) => v.startsWith(viewPrefix))
     .sort();
@@ -99,12 +142,15 @@ export async function fetchViews(range: TimeRange): Promise<string[]> {
 const columnCache = new Map<string, Promise<string[]>>();
 
 /** Column names of a view. DESCRIBE is denied by Ranger, so this uses SELECT * ... LIMIT 0. */
-export function fetchColumns(view: string, range: TimeRange): Promise<string[]> {
-  let p = columnCache.get(view);
+export function fetchColumns(view: string, range: TimeRange, datasource?: string): Promise<string[]> {
+  const key = `${datasource ?? ''}/${view}`;
+  let p = columnCache.get(key);
   if (!p) {
-    p = runSqlOnce(columnsQuery(view), range, 'columns').then((frames) => (frames[0]?.fields ?? []).map((f) => f.name));
-    p.catch(() => columnCache.delete(view));
-    columnCache.set(view, p);
+    p = runSqlOnce(columnsQuery(view), range, 'columns', datasource).then((frames) =>
+      (frames[0]?.fields ?? []).map((f) => f.name)
+    );
+    p.catch(() => columnCache.delete(key));
+    columnCache.set(key, p);
   }
   return p;
 }

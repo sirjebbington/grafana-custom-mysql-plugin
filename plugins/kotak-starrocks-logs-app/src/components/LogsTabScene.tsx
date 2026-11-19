@@ -86,7 +86,9 @@ export class LogsTabScene extends SceneObjectBase<LogsTabState> {
       ctx,
       tr.value
     );
-    const { datasource } = getAppConfig();
+    const config = getAppConfig();
+    // the data source selected in the app (each one is a different StarRocks database)
+    const datasource = { type: config.datasource.type, uid: this.state.spec.datasource || config.datasource.uid };
     const panes = {
       a: {
         datasource: datasource.uid,

@@ -8,6 +8,9 @@ import { expect, Page, test } from '@playwright/test';
 const APP = '/a/kotak-starrocks-logs-app/explore';
 const OBS = 'vw_eks_app_logs_app_1961_observability';
 const CMM = 'vw_eks_app_logs_app_01996_frontlineplatforms_cmm';
+const PAYMENTS = 'vw_eks_app_logs_app_04000_payments';
+const DS1 = 'e2e-ds-starrocks-logs';
+const DS2 = 'e2e-ds-starrocks-logs2';
 const SHOTS = 'test-results/screenshots';
 
 async function login(page: Page, user: string) {
@@ -57,6 +60,42 @@ test.describe('as kmbl3e2e (two granted views)', () => {
     await expect(options.nth(0)).toHaveText(CMM);
     await expect(options.nth(1)).toHaveText(OBS);
     await page.keyboard.press('Escape');
+  });
+
+  test('data source picker: both StarRocks databases, switching changes the views, kept in the URL', async ({
+    page,
+  }) => {
+    await page.goto(APP);
+    // default data source, first view (sorted): cmm
+    await expect(page.getByTestId('service-row-cmm-api')).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`ds=${DS1}`));
+    const dsPicker = page.getByLabel('Data source', { exact: true });
+    await dsPicker.click();
+    const options = page.getByRole('option');
+    await expect(options).toHaveCount(2);
+    await expect(options.nth(0)).toContainText('app-logs-starrocks-db');
+    await expect(options.nth(1)).toContainText('app-logs-starrocks-db2');
+    await options.nth(1).click();
+    await expect(page).toHaveURL(new RegExp(`ds=${DS2}`));
+    // first view of the second database (sorted): payments
+    await expect(page.getByTestId('service-row-payments-api')).toBeVisible();
+    await page.getByLabel('View', { exact: true }).click();
+    await expect(page.getByRole('option')).toHaveCount(2);
+    await page.getByRole('option', { name: OBS }).click();
+    await expect(page.getByTestId('service-row-archive-compactor')).toBeVisible();
+    await expect(page.getByTestId('service-row-cmm-api')).toHaveCount(0);
+    await page.screenshot({ path: `${SHOTS}/11-datasource-picker.png` });
+    await page.reload();
+    await expect(page.getByTestId('service-row-archive-compactor')).toBeVisible();
+    await expect(page.getByText('app-logs-starrocks-db2').first()).toBeVisible();
+  });
+
+  test('per-database tenant settings: the level comes from the column in the second database', async ({ page }) => {
+    await page.goto(
+      appUrl({ ds: DS2, view: OBS, filter: filter('k8s_service_name', '=', 'archive-compactor'), level: 'error' })
+    );
+    await expect(logsMain(page)).toContainText('segment upload failed');
+    await expect(logsMain(page)).not.toContainText('compacted segment');
   });
 
   test('service grid: volume and newest lines for every service, search, Show logs', async ({ page }) => {
@@ -232,6 +271,17 @@ test('another user sees only their own view', async ({ page }) => {
   await expect(page.getByTestId('service-row-dpdpa-api')).toBeVisible();
   await page.getByLabel('View', { exact: true }).click();
   await expect(page.getByRole('option')).toHaveCount(1);
+});
+
+test('a user with access to the second database only lands on it', async ({ page }) => {
+  await login(page, 'kmbl3db2only');
+  await page.goto(APP);
+  await expect(page.getByTestId('service-row-payments-api')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`ds=${DS2}`));
+  await expect(page).toHaveURL(new RegExp(`view=${PAYMENTS}`));
+  // the first data source is still offered, marked with why it could not be used
+  await page.getByLabel('Data source', { exact: true }).click();
+  await expect(page.getByRole('option').first()).toContainText(/refused|invalid connection|denied/i);
 });
 
 test('a user with no grants gets an explanation, not data', async ({ page }) => {

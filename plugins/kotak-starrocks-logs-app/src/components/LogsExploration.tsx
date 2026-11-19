@@ -16,8 +16,8 @@ import {
 import { Alert, Button, Select, Tab, TabsBar, useStyles2 } from '@grafana/ui';
 
 import { LEVELS } from '../constants';
-import { getAppConfig, getAppConfigErrors } from '../config/config';
-import { fetchViews } from '../datasource/api';
+import { getAppConfig, getAppConfigErrors, viewPrefixFor } from '../config/config';
+import { fetchViews, listDatasources, StarRocksDatasource } from '../datasource/api';
 import { buildContext } from '../datasource/StarRocksLogsDataSource';
 import { BuildContext, needsMessageScan } from '../sql/builder';
 import {
@@ -42,6 +42,11 @@ import { ServiceSelectionScene } from './ServiceSelectionScene';
 import { ErrorBox, Loading, ScanGuard } from './ui';
 
 export interface LogsExplorationState extends SceneObjectState {
+  /** selected kotak-starrocks-datasource instance (one StarRocks database) */
+  datasource?: string;
+  datasources?: StarRocksDatasource[];
+  /** why a data source could not be used (no access, no views), shown in the picker */
+  datasourceProblems?: Record<string, string>;
   view?: string;
   views?: string[];
   viewsError?: string;
@@ -67,6 +72,7 @@ export interface LogsExplorationState extends SceneObjectState {
 }
 
 const URL_KEYS = [
+  'ds',
   'view',
   'label',
   'filter',
@@ -118,7 +124,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
         }
       });
       if (this.state.views === undefined) {
-        this.loadViews();
+        this.loadDatasources();
       } else {
         this.rebuild();
       }
@@ -132,6 +138,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     const s = this.state;
     const list = (a: string[]) => (a.length > 0 ? a : null);
     return {
+      ds: s.datasource ?? null,
       view: s.view ?? null,
       label: s.primaryLabel ?? null,
       filter: list(s.filters.map(encodeFilter)),
@@ -155,6 +162,9 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       return v.length > 0 ? v[0] : undefined;
     };
     const next: Partial<LogsExplorationState> = {};
+    if ('ds' in values) {
+      next.datasource = one('ds');
+    }
     if ('view' in values) {
       next.view = one('view');
     }
@@ -200,10 +210,13 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     if ('search' in values) {
       next.search = one('search') ?? '';
     }
+    const dsChanged = next.datasource !== undefined && next.datasource !== this.state.datasource;
     const viewChanged = next.view !== undefined && next.view !== this.state.view;
     this.setState(next);
     if (this.isActive) {
-      if (viewChanged && next.view) {
+      if (dsChanged && next.datasource) {
+        this.loadViews(next.datasource);
+      } else if (viewChanged && next.view) {
         this.loadContext(next.view);
       } else {
         this.rebuild();
@@ -213,18 +226,69 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
 
   // ---- loading ----
 
-  private async loadViews() {
+  /**
+   * Lists the StarRocks data sources and picks one: the one in the URL if any (no fallback: the user chose
+   * it), otherwise the configured default, falling back to the next data source where the user can see
+   * views (people with access to one database only land on it).
+   */
+  private async loadDatasources() {
+    const list = listDatasources();
+    this.setState({ datasources: list, datasourceProblems: {} });
+    if (list.length === 0) {
+      const type = getAppConfig().datasource.type;
+      this.setState({ views: [], viewsError: `No ${type} data source is available to you in this organization.` });
+      this.rebuild();
+      return;
+    }
+    const chosen = this.state.datasource;
+    if (chosen && list.some((d) => d.uid === chosen)) {
+      await this.loadViews(chosen);
+      return;
+    }
+    const def = getAppConfig().datasource.uid;
+    const order = [...list.filter((d) => d.uid === def), ...list.filter((d) => d.uid !== def)].map((d) => d.uid);
+    const problems: Record<string, string> = {};
+    for (const uid of order) {
+      try {
+        const views = await fetchViews(sceneGraph.getTimeRange(this).state.value, uid);
+        if (views.length > 0) {
+          this.setState({ datasource: uid, datasourceProblems: problems });
+          await this.applyViews(views);
+          return;
+        }
+        problems[uid] = 'no log views for you';
+      } catch (e) {
+        problems[uid] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    // nothing usable: show the first data source and why it failed
+    this.setState({ datasource: order[0], datasourceProblems: problems });
+    await this.loadViews(order[0]);
+  }
+
+  private async loadViews(datasource: string) {
+    const req = ++this.ctxRequest;
+    this.setState({ views: undefined, viewsError: undefined, ctx: undefined, ctxError: undefined });
+    this.rebuild();
     try {
-      const views = await fetchViews(sceneGraph.getTimeRange(this).state.value);
-      const view = this.state.view && views.includes(this.state.view) ? this.state.view : views[0];
-      this.setState({ views, view, viewsError: undefined });
-      if (view) {
-        await this.loadContext(view);
-      } else {
-        this.rebuild();
+      const views = await fetchViews(sceneGraph.getTimeRange(this).state.value, datasource);
+      if (req === this.ctxRequest) {
+        await this.applyViews(views);
       }
     } catch (e) {
-      this.setState({ views: [], viewsError: e instanceof Error ? e.message : String(e) });
+      if (req === this.ctxRequest) {
+        this.setState({ views: [], viewsError: e instanceof Error ? e.message : String(e) });
+        this.rebuild();
+      }
+    }
+  }
+
+  private async applyViews(views: string[]) {
+    const view = this.state.view && views.includes(this.state.view) ? this.state.view : views[0];
+    this.setState({ views, view, viewsError: undefined });
+    if (view) {
+      await this.loadContext(view);
+    } else {
       this.rebuild();
     }
   }
@@ -234,7 +298,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     this.setState({ ctx: undefined, ctxError: undefined });
     this.rebuild();
     try {
-      const ctx = await buildContext(view, sceneGraph.getTimeRange(this).state.value);
+      const ctx = await buildContext(view, sceneGraph.getTimeRange(this).state.value, this.state.datasource ?? '');
       if (req === this.ctxRequest) {
         this.setState({ ctx });
       }
@@ -253,6 +317,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
   getSpec(): QuerySpec {
     const s = this.state;
     return {
+      datasource: s.datasource ?? '',
       view: s.view ?? '',
       filters: s.filters,
       levels: s.levels,
@@ -278,6 +343,23 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
 
   isDetails() {
     return this.state.filters.length > 0;
+  }
+
+  /** Switch database: views, columns and filters belong to the data source, so they are reset. */
+  setDatasource(uid: string) {
+    if (uid === this.state.datasource) {
+      return;
+    }
+    this.setState({
+      datasource: uid,
+      view: undefined,
+      ...this.clearedFilters(),
+      breakdown: undefined,
+      tab: 'logs',
+      search: '',
+      primaryLabel: undefined,
+    });
+    this.loadViews(uid);
   }
 
   setView(view: string) {
@@ -474,8 +556,10 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
   private buildBody(): SceneObject {
     const s = this.state;
     const config = getAppConfig();
+    const dsName = s.datasources?.find((d) => d.uid === s.datasource)?.name ?? s.datasource ?? '';
     if (s.viewsError) {
-      return this.message('error', 'Could not list your StarRocks log views', s.viewsError);
+      const others = (s.datasources?.length ?? 0) > 1 ? ' Try another data source.' : '';
+      return this.message('error', `Could not list your StarRocks log views in ${dsName}`, `${s.viewsError}${others}`);
     }
     if (s.views === undefined) {
       return new SceneReactObject({ reactNode: <Loading text="Loading your views…" /> });
@@ -484,7 +568,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       return this.message(
         'info',
         'No log views available',
-        `StarRocks returned no views matching ${config.viewPrefix}* for your account. Ask for access to your team's log view.`
+        `StarRocks returned no views matching ${viewPrefixFor(config, s.datasource)}* in ${dsName} for your account. Ask for access to your team's log view${(s.datasources?.length ?? 0) > 1 ? ', or pick another data source' : ''}.`
       );
     }
     if (s.ctxError) {
@@ -540,7 +624,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
 function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>) {
   const styles = useStyles2(getStyles);
   const state = model.useState();
-  const { views, view, body, controls, ctx, tab, primaryLabel } = state;
+  const { views, view, body, controls, ctx, tab, primaryLabel, datasources, datasource, datasourceProblems } = state;
   const config = getAppConfig();
   const errors = getAppConfigErrors();
   const details = model.isDetails();
@@ -561,6 +645,21 @@ function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>
         </Alert>
       )}
       <div className={styles.topRow}>
+        <span className={styles.label}>Data source</span>
+        <Select
+          width={32}
+          aria-label="Data source"
+          data-testid="datasource-picker"
+          isLoading={datasources === undefined}
+          options={(datasources ?? []).map((d) => ({
+            label: d.name,
+            value: d.uid,
+            description: datasourceProblems?.[d.uid],
+          }))}
+          value={datasource ?? null}
+          onChange={(o) => o.value && model.setDatasource(o.value)}
+          placeholder="Select a data source"
+        />
         <span className={styles.label}>View</span>
         <Select
           width={48}

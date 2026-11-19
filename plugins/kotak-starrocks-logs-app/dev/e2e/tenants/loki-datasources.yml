@@ -30,3 +30,7 @@ datasources:
         uid: e2e-ds-starrocks-logs
         type: kotak-starrocks-datasource
         orgId: 1
+      - name: app-logs-starrocks-db2
+        uid: e2e-ds-starrocks-logs2
+        type: kotak-starrocks-datasource
+        orgId: 1

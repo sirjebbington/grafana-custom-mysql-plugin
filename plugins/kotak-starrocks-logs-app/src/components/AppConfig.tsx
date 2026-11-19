@@ -7,10 +7,11 @@ import { Alert, Button, Field, TextArea, useStyles2 } from '@grafana/ui';
 
 import { PLUGIN_ID } from '../constants';
 import { AppJsonData, resolveConfig, setAppConfig } from '../config/config';
-import { fetchViews } from '../datasource/api';
+import { fetchViews, listDatasources } from '../datasource/api';
 
 const EXAMPLE: AppJsonData = {
   datasourceUid: 'app-logs-starrocks-db',
+  datasources: ['app-logs-starrocks-db', { uid: 'app-logs-starrocks-db2', viewPrefix: 'vw_eks_app_logs_' }],
   viewPrefix: 'vw_eks_app_logs_',
   maxScanHours: 6,
   tenants: {
@@ -62,19 +63,26 @@ export function AppConfig({ plugin }: PluginConfigPageProps<AppPluginMeta<AppJso
 
   const testViews = async () => {
     setAppConfig(parsed);
-    try {
-      const list = await fetchViews(rangeUtil.convertRawToRange({ from: 'now-15m', to: 'now' }));
-      setViews(list.length > 0 ? list.join(', ') : '(none)');
-    } catch (e) {
-      setViews(`error: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    const range = rangeUtil.convertRawToRange({ from: 'now-15m', to: 'now' });
+    const lines = await Promise.all(
+      listDatasources().map(async (ds) => {
+        try {
+          const list = await fetchViews(range, ds.uid);
+          return `${ds.name}: ${list.length > 0 ? list.join(', ') : '(none)'}`;
+        } catch (e) {
+          return `${ds.name}: error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      })
+    );
+    setViews(lines.length > 0 ? lines.join('\n') : `(no ${config.datasource.type} data source visible)`);
   };
 
   return (
     <div className={styles.wrapper} data-testid="app-config">
       <p>
-        The app sends SQL through the StarRocks data source <code>{config.datasource.uid}</code> as the signed-in user.
-        Settings are usually provisioned from deploy-config; edits saved here are replaced by the next provisioning run.
+        The app sends SQL through the StarRocks data source chosen in its picker (default{' '}
+        <code>{config.datasource.uid}</code>; one data source per database) as the signed-in user. Settings are usually
+        provisioned from deploy-config; edits saved here are replaced by the next provisioning run.
       </p>
       {(parseError || errors.length > 0) && (
         <Alert severity="warning" title="Configuration problems (invalid entries are ignored)">
@@ -88,7 +96,7 @@ export function AppConfig({ plugin }: PluginConfigPageProps<AppPluginMeta<AppJso
       )}
       <Field
         label="jsonData"
-        description="Keys: datasourceUid, viewPrefix, serviceLabel, defaultTimeRange, maxScanHours, lineLimit, labels, fields, tenants"
+        description="Keys: datasourceUid, datasources, viewPrefix, serviceLabel, defaultTimeRange, maxScanHours, lineLimit, labels, fields, tenants (app_id or <datasourceUid>/<app_id>)"
       >
         <TextArea rows={24} value={text} onChange={(e) => setText(e.currentTarget.value)} className={styles.mono} />
       </Field>
@@ -104,8 +112,10 @@ export function AppConfig({ plugin }: PluginConfigPageProps<AppPluginMeta<AppJso
         </Button>
       </div>
       {views && (
-        <Alert severity="info" title="Views visible to you">
-          {views}
+        <Alert severity="info" title="Views visible to you, per data source">
+          <pre className={styles.mono} data-testid="config-views">
+            {views}
+          </pre>
         </Alert>
       )}
       {saveError && (

@@ -69,14 +69,14 @@ const ALL_COLUMNS = [
   ...DEFAULT_FIELDS,
 ];
 
-export async function buildContext(view: string, range: TimeRange): Promise<BuildContext> {
+export async function buildContext(view: string, range: TimeRange, datasource = ''): Promise<BuildContext> {
   const config = getAppConfig();
-  let columns = await fetchColumns(view, range);
+  let columns = await fetchColumns(view, range, datasource);
   if (columns.length === 0) {
     columns = ALL_COLUMNS;
   }
   return {
-    tenant: resolveTenant(config, view),
+    tenant: resolveTenant(config, view, datasource || config.datasource.uid),
     columns,
     labels: config.labels.filter((c) => columns.includes(c)),
     fields: config.fields.filter((c) => columns.includes(c)),
@@ -146,10 +146,10 @@ function errorResponse(refId: string, err: unknown): DataQueryResponse {
 
 /** Runs one structured query and returns frames ready for the panels. */
 export function runLogsQuery(q: LogsAppQuery, range: TimeRange, requestId?: string): Observable<DataQueryResponse> {
-  return from(buildContext(q.spec.view, range)).pipe(
+  return from(buildContext(q.spec.view, range, q.spec.datasource)).pipe(
     switchMap((ctx) => {
       const sql = buildSql(q, ctx, range);
-      return runSql(sql, { refId: q.refId, range, requestId }).pipe(
+      return runSql(sql, { datasource: q.spec.datasource, refId: q.refId, range, requestId }).pipe(
         map((res): DataQueryResponse => {
           const err = res.errors?.[0] ?? res.error;
           if (err) {
@@ -220,9 +220,10 @@ export class StarRocksLogsDataSource extends RuntimeDataSource<LogsAppQuery> {
       to: dateTime(center + 3600_000),
       raw: { from: dateTime(center - 3600_000), to: dateTime(center + 3600_000) },
     };
-    const ctx = await buildContext(view, range);
+    const datasource = query?.spec?.datasource ?? '';
+    const ctx = await buildContext(view, range, datasource);
     const sql = contextQuery(view, ctx, podColumn, pod, tsRaw, direction, options?.limit ?? 50);
-    const res = await lastValueFrom(runSql(sql, { refId: `context-${direction}`, range }));
+    const res = await lastValueFrom(runSql(sql, { datasource, refId: `context-${direction}`, range }));
     const err = res.errors?.[0] ?? res.error;
     if (err) {
       throw new Error(err.message);

@@ -25,7 +25,9 @@ sr() { "${COMPOSE[@]}" exec -T starrocks mysql -h127.0.0.1 -P9030 -uroot "$@"; }
 seed() {
   echo "seeding StarRocks..."
   python3 dev/e2e/seed.py "${SEED_HOURS:-4}" | sr
-  sr -N -e "SELECT app_id, COUNT(*) FROM obs2_logs1_uat.eks_app_logs GROUP BY app_id ORDER BY app_id"
+  for db in obs2_logs1_uat obs2_logs2_uat; do
+    sr -N -e "SELECT '$db', app_id, COUNT(*) FROM $db.eks_app_logs GROUP BY app_id ORDER BY app_id"
+  done
 }
 
 # The app's provisioning file is generated like in deploy-config: from Loki-style data source entries plus
@@ -34,7 +36,7 @@ tenants() {
   python3 scripts/gen-tenants-from-loki.py dev/e2e/tenants/loki-datasources.yml \
     --datasource-uid e2e-ds-starrocks-logs \
     --overrides dev/e2e/tenants/tenants-overrides.yml \
-    --settings dev/e2e/tenants/app-settings.yml > dev/e2e/provisioning/plugins/kotak-starrocks-logs-app.yaml
+    --settings dev/e2e/tenants/app-settings.yml --pin-datasources > dev/e2e/provisioning/plugins/kotak-starrocks-logs-app.yaml
   echo "generated dev/e2e/provisioning/plugins/kotak-starrocks-logs-app.yaml"
 }
 

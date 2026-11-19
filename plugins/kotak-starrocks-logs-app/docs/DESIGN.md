@@ -37,6 +37,22 @@ A `QuerySpec` is the view plus every filter (label filters, levels, line filters
 message-field filters). Panels send `{kind, spec, params}` to the runtime data source, which builds the SQL,
 runs it, and turns the rows into frames (log lines, per-level series, per-value series).
 
+## Data sources and databases
+
+Each `kotak-starrocks-datasource` instance is scoped to one StarRocks database (its `database` setting, which
+is also the database StarRocks checks at login). The app therefore has a **Data source picker** next to the
+view picker:
+
+- The list is `datasources` from the settings (allowlist and order), or every instance of the plugin type
+  the user can see in the org. In OSS Grafana every org user sees every data source; the picker is not an
+  access control, Ranger still is.
+- Every query carries the selected data source uid (`QuerySpec.datasource`); views, columns and filters
+  belong to it, so switching resets them. The choice is in the URL (`ds`).
+- Without a choice in the URL, the app tries `datasourceUid` first and falls back to the next data source
+  where `SHOW TABLES` returns views for the user; failures are shown next to the data source in the picker.
+- Tenant settings can be scoped to one database: `tenants["<datasourceUid>/<app_id>"]` wins field by field
+  over `tenants["<app_id>"]`, then `default`. A data source can have its own `viewPrefix`.
+
 ## SQL per feature
 
 All queries start with `WHERE $__timeFilter(observed_timestamp)` (expanded by the datasource; it lets

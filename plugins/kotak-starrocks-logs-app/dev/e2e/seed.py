@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Prints SQL that (re)creates the local e2e data: an eks_app_logs-shaped table (same 21 columns as the UAT
-Iceberg table), per-tenant views like vw_eks_app_logs_<app_id>, and native StarRocks users authenticated with
-the mock IDAM's JWTs, each granted SELECT on some views (stands in for Ranger).
+"""Prints SQL that (re)creates the local e2e data: two databases (one per kotak-starrocks-datasource
+instance), each with an eks_app_logs-shaped table (same 21 columns as the UAT Iceberg table) and per-tenant
+views like vw_eks_app_logs_<app_id>, and native StarRocks users authenticated with the mock IDAM's JWTs, each
+granted SELECT on some views (stands in for Ranger).
 
   python3 dev/e2e/seed.py [hours] | mysql -h127.0.0.1 -P29030 -uroot
 
@@ -14,7 +15,6 @@ import sys
 HOURS = float(sys.argv[1]) if len(sys.argv) > 1 else 4.0
 RNG = random.Random(1961)
 NOW = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
-DB = "obs2_logs1_uat"
 JWT = (
     '{"jwks_url": "http://idam:8080/idam/jwks", "principal_field": "sub", '
     '"required_issuer": "http://idam:8080/idam", "required_audience": "grafana-e2e"}'
@@ -113,12 +113,27 @@ def cmm_line(ts):
     return f"{ts:%Y-%m-%d %H:%M:%S} {thread} c.k.cmm.OrderController - created order id={RNG.randint(1000, 9999)} amount={RNG.randint(1, 900)}{trace}", level
 
 
+def archive_line(ts):
+    if RNG.random() < 0.1:
+        return f"segment upload failed for partition {RNG.randint(1, 99)}: timeout after {RNG.randint(5, 30)}s", "ERROR"
+    if RNG.random() < 0.2:
+        return f"compaction slow: {RNG.randint(100, 900)} files pending", "WARN"
+    return f"compacted segment {RNG.randint(1000, 9999)} in {RNG.randint(5, 900)}ms", "INFO"
+
+
+def payments_line(ts):
+    level = RNG.choice(["INFO", "INFO", "INFO", "WARN", "ERROR"])
+    if level == "ERROR":
+        return f"charge declined for order {RNG.randint(1000, 9999)} reason=insufficient_funds", level
+    return f"charge captured order={RNG.randint(1000, 9999)} amount={RNG.randint(1, 900)}", level
+
+
 def dpdpa_line(ts):
     level = RNG.choice(["INFO", "INFO", "WARN", "ERROR"])
     return f"{ts:%Y-%m-%d %H:%M:%S} consent {RNG.choice(['granted', 'revoked'])} for principal {hexid(12)}", level
 
 
-TENANTS = {
+TENANTS_DB1 = {
     "app_1961_observability": {
         "rows": 40000, "tenant": "observability",
         "services": [
@@ -143,11 +158,34 @@ TENANTS = {
     },
 }
 
-# user -> views (app_ids) it may read
+# second database: the same tenant (observability, but with the level column filled) and a new tenant
+TENANTS_DB2 = {
+    "app_1961_observability": {
+        "rows": 6000, "tenant": "observability",
+        "services": [
+            ("archive-compactor", "observability", "statefulset", 2, archive_line, 0.7),
+            ("cold-reader", "observability", "deployment", 2, archive_line, 0.3),
+        ],
+    },
+    "app_04000_payments": {
+        "rows": 4000, "tenant": "payments",
+        "services": [("payments-api", "payments", "deployment", 2, payments_line, 1.0)],
+    },
+}
+
+DATABASES = {"obs2_logs1_uat": TENANTS_DB1, "obs2_logs2_uat": TENANTS_DB2}
+
+# user -> (database, app_id) views it may read
 GRANTS = {
-    "kmbl3e2e": ["app_1961_observability", "app_01996_frontlineplatforms_cmm"],
-    "kmbl3admin": ["app_1961_observability"],
-    "kmbl3other": ["app_03123_dpdpa"],
+    "kmbl3e2e": [
+        ("obs2_logs1_uat", "app_1961_observability"),
+        ("obs2_logs1_uat", "app_01996_frontlineplatforms_cmm"),
+        ("obs2_logs2_uat", "app_1961_observability"),
+        ("obs2_logs2_uat", "app_04000_payments"),
+    ],
+    "kmbl3admin": [("obs2_logs1_uat", "app_1961_observability")],
+    "kmbl3other": [("obs2_logs1_uat", "app_03123_dpdpa")],
+    "kmbl3db2only": [("obs2_logs2_uat", "app_04000_payments")],
     "kmbl3none": [],
 }
 
@@ -181,25 +219,26 @@ def rows_for(app_id, spec):
 
 def main():
     w = sys.stdout.write
-    w(f"CREATE DATABASE IF NOT EXISTS {DB};\nUSE {DB};\nDROP TABLE IF EXISTS eks_app_logs;\n")
     cols = ",\n  ".join(
         f"{c} DATETIME" if c == "observed_timestamp" else (f"{c} VARCHAR(65533)" if c == "message" else f"{c} VARCHAR(512)")
         for c in COLUMNS
     )
-    w(f"CREATE TABLE eks_app_logs (\n  {cols}\n) DUPLICATE KEY(app_env, app_id)\n"
-      "DISTRIBUTED BY HASH(app_id) BUCKETS 3 PROPERTIES (\"replication_num\" = \"1\");\n")
-    for app_id, spec in TENANTS.items():
-        rows = rows_for(app_id, spec)
-        for i in range(0, len(rows), 2000):
-            batch = rows[i:i + 2000]
-            w("INSERT INTO eks_app_logs VALUES\n" + ",\n".join("(" + ", ".join(q(v) for v in r) + ")" for r in batch) + ";\n")
-        w(f"DROP VIEW IF EXISTS vw_eks_app_logs_{app_id};\n")
-        w(f"CREATE VIEW vw_eks_app_logs_{app_id} AS SELECT * FROM eks_app_logs WHERE app_id = {q(app_id)};\n")
-    for user, apps in GRANTS.items():
+    for db, tenants in DATABASES.items():
+        w(f"CREATE DATABASE IF NOT EXISTS {db};\nUSE {db};\nDROP TABLE IF EXISTS eks_app_logs;\n")
+        w(f"CREATE TABLE eks_app_logs (\n  {cols}\n) DUPLICATE KEY(app_env, app_id)\n"
+          "DISTRIBUTED BY HASH(app_id) BUCKETS 3 PROPERTIES (\"replication_num\" = \"1\");\n")
+        for app_id, spec in tenants.items():
+            rows = rows_for(app_id, spec)
+            for i in range(0, len(rows), 2000):
+                batch = rows[i:i + 2000]
+                w("INSERT INTO eks_app_logs VALUES\n" + ",\n".join("(" + ", ".join(q(v) for v in r) + ")" for r in batch) + ";\n")
+            w(f"DROP VIEW IF EXISTS vw_eks_app_logs_{app_id};\n")
+            w(f"CREATE VIEW vw_eks_app_logs_{app_id} AS SELECT * FROM eks_app_logs WHERE app_id = {q(app_id)};\n")
+    for user, views in GRANTS.items():
         w(f"DROP USER IF EXISTS '{user}'@'%';\n")
         w(f"CREATE USER '{user}'@'%' IDENTIFIED WITH authentication_jwt AS {q(JWT)};\n")
-        for app_id in apps:
-            w(f"GRANT SELECT ON VIEW {DB}.vw_eks_app_logs_{app_id} TO USER '{user}'@'%';\n")
+        for db, app_id in views:
+            w(f"GRANT SELECT ON VIEW {db}.vw_eks_app_logs_{app_id} TO USER '{user}'@'%';\n")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ export interface MessageFieldFilter {
 
 /** Everything that narrows the rows of a view, independent of the time range. */
 export interface QuerySpec {
+  /** uid of the kotak-starrocks-datasource instance (one StarRocks database); '' = the default one */
+  datasource: string;
   view: string;
   filters: LabelFilter[];
   levels: string[];
@@ -62,6 +64,6 @@ export interface QueryParams {
   withLevel?: boolean;
 }
 
-export function emptySpec(view: string): QuerySpec {
-  return { view, filters: [], levels: [], lineFilters: [], patternFilters: [], fieldFilters: [] };
+export function emptySpec(view: string, datasource = ''): QuerySpec {
+  return { datasource, view, filters: [], levels: [], lineFilters: [], patternFilters: [], fieldFilters: [] };
 }
