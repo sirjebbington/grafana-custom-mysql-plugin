@@ -63,7 +63,9 @@ values (`TODO(<owner>)`); log decisions in `HANDOFF_FILE`; terse replies.
 1. In `ORG_PLUGIN_REPO`: new branch `feature/starrocks-logs-ds-picker` from `BASE_BRANCH`.
 2. In `GITHUB_SOURCE`: `git diff 60b0353 <edit2-commit> -- plugins/kotak-starrocks-logs-app > /tmp/ds-picker.patch`.
 3. In `ORG_PLUGIN_REPO`: `git apply --3way /tmp/ds-picker.patch`. Resolve conflicts by keeping the org-side
-   intent and the edit 2 behaviour; show every conflict resolution as a diff.
+   intent and the edit 2 behaviour; show every conflict resolution as a diff. Expected and harmless: for the
+   new file `docs/ORG_AGENT_PROMPT_2_DATASOURCE_PICKER.md` git prints "does not exist in index … Falling back to
+   direct application" (verified upstream: on an unmodified 0.1.0 folder all 27 files apply cleanly).
 4. Do not touch `plugins/kotak-starrocks-datasource/`, `pipelines/` or the repo root.
 
 **CHECKPOINT 2**: user reviews `git status` and the conflict resolutions, if any.
