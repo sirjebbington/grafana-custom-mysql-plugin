@@ -1,0 +1,4 @@
+# Each plugin folder has its own .gitignore; these apply repository-wide.
+node_modules/
+.DS_Store
+.idea

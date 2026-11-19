@@ -1,0 +1,17 @@
+{
+  "interactiveLogin": true,
+  "httpServer": "NettyWrapper",
+  "tokenCallbacks": [
+    {
+      "issuerId": "idam",
+      "tokenExpiry": 3600,
+      "requestMappings": [
+        {
+          "requestParam": "grant_type",
+          "match": "refresh_token",
+          "claims": { "aud": ["grafana-e2e"] }
+        }
+      ]
+    }
+  ]
+}

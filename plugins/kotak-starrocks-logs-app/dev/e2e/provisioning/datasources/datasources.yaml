@@ -1,0 +1,31 @@
+apiVersion: 1
+datasources:
+  - name: app-logs-starrocks-db
+    uid: e2e-ds-starrocks-logs
+    type: kotak-starrocks-datasource
+    access: proxy
+    orgId: 1
+    url: starrocks:9030
+    editable: false
+    jsonData:
+      database: obs2_logs1_uat
+      oauthPassThru: true
+      tokenSource: access_token
+      usernameClaim: sub
+      maxConnsPerUser: 5
+      connMaxIdleSeconds: 60
+      # the local StarRocks container has no TLS; never set this in a real environment
+      allowPlaintext: true
+  # Tempo is not running locally; the app only needs the uids to build "View trace" links into Explore.
+  - name: tempo-obs
+    uid: e2e-tempo-obs
+    type: tempo
+    access: proxy
+    orgId: 1
+    url: http://tempo:3200
+  - name: tempo-cmm
+    uid: e2e-tempo-cmm
+    type: tempo
+    access: proxy
+    orgId: 1
+    url: http://tempo:3200

@@ -1,0 +1,59 @@
+# Local end-to-end environment for kotak-starrocks-logs-app: Grafana 12.0.1-security-01 with the app and the
+# (unchanged) kotak-starrocks-datasource, a mock OIDC provider standing in for IDAM, and StarRocks 4.0.10 with
+# an eks_app_logs-shaped table, per-tenant views and native JWT users with per-view grants.
+# Driven by scripts/e2e.sh. Ports differ from the datasource repo's e2e stack so both can run.
+name: kotak-starrocks-logs-e2e
+
+services:
+  starrocks:
+    image: starrocks/allin1-ubuntu:4.0.10
+    ports:
+      - "29030:9030"
+
+  idam:
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    ports:
+      - "28080:8080"
+    environment:
+      JSON_CONFIG_PATH: /config/mock-idam.json
+    volumes:
+      - ./mock-idam.json:/config/mock-idam.json:ro
+
+  grafana:
+    image: grafana/grafana-oss:12.0.1-security-01
+    ports:
+      - "23000:3000"
+    depends_on:
+      - idam
+      - starrocks
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:23000/
+      GF_LOG_LEVEL: info
+      # as in UAT/prod grafana.ini: Viewers can use Explore (trace links and Open in Explore need it)
+      GF_USERS_VIEWERS_CAN_EDIT: "true"
+      GF_PATHS_PLUGINS: /grafana/plugins
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: kotak-starrocks-datasource,kotak-starrocks-logs-app
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_FEATURE_TOGGLES_ENABLE: accessTokenExpirationCheck
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_NAME: IDAM
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: grafana-e2e
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: e2e-secret
+      GF_AUTH_GENERIC_OAUTH_SCOPES: openid email profile offline_access
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: http://localhost:28080/idam/authorize
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: http://idam:8080/idam/token
+      GF_AUTH_GENERIC_OAUTH_API_URL: http://idam:8080/idam/userinfo
+      GF_AUTH_GENERIC_OAUTH_AUTH_STYLE: InParams
+      GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH: sub
+      GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH: email
+      # kmbl3admin is a Grafana Admin (configuration page test); everyone else is a Viewer, as in the org
+      GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "sub == 'kmbl3admin' && 'Admin' || 'Viewer'"
+      GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP: "true"
+      GF_AUTH_GENERIC_OAUTH_USE_REFRESH_TOKEN: "true"
+    volumes:
+      # [navigation.app_sections]: shows the app as a card on the Drilldown page (same as the Helm grafana.ini)
+      - ./grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ../../dist:/grafana/plugins/kotak-starrocks-logs-app:ro
+      - ${DATASOURCE_DIST:-../../../kotak-starrocks-datasource/dist}:/grafana/plugins/kotak-starrocks-datasource:ro

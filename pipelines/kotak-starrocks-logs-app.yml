@@ -1,0 +1,25 @@
+# PROPOSAL: pipeline for the app folder. Only changes under plugins/kotak-starrocks-logs-app trigger it.
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [plugins/kotak-starrocks-logs-app/*]
+pr:
+  paths:
+    include: [plugins/kotak-starrocks-logs-app/*]
+
+parameters:
+  - name: publish
+    type: boolean
+    default: false
+
+pool:
+  name: CI_Shared_Linux
+
+steps:
+  - template: templates/build-plugin-steps.yml
+    parameters:
+      pluginDir: plugins/kotak-starrocks-logs-app
+      pluginId: kotak-starrocks-logs-app
+      hasBackend: false
+      publish: ${{ parameters.publish }}

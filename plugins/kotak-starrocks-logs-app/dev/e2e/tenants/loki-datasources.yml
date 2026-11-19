@@ -1,0 +1,32 @@
+# e2e input for scripts/gen-tenants-from-loki.py: the Loki data sources as they would appear in
+# deploy-config grafana-values.yml (same shape; e2e tenants, no secrets). The cmm tenant has a Loki derived
+# field (trace link); observability has none (its settings come from tenants-overrides.yml).
+datasources:
+  datasources.yaml:
+    datasources:
+      - name: obs_public_logs
+        uid: e2e_ds_loki_obs_public
+        type: loki
+        orgId: 1
+        jsonData:
+          httpHeaderName1: X-Scope-OrgID
+        secureJsonData:
+          httpHeaderValue1: app-1961-observability
+      - name: cmm_public_logs
+        uid: e2e_ds_loki_cmm_public
+        type: loki
+        orgId: 1
+        jsonData:
+          derivedFields:
+            - name: TraceID
+              datasourceUid: 'e2e-tempo-cmm'
+              matcherRegex: "trace_id=(\\w+)"
+              url: '$${__value.raw}'
+              urlDisplayLabel: 'View Trace'
+          httpHeaderName1: X-Scope-OrgID
+        secureJsonData:
+          httpHeaderValue1: app-01996-frontlineplatforms-cmm
+      - name: app-logs-starrocks-db
+        uid: e2e-ds-starrocks-logs
+        type: kotak-starrocks-datasource
+        orgId: 1

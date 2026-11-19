@@ -1,0 +1,25 @@
+# PROPOSAL: pipeline for the datasource folder (same template, Go steps on).
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [plugins/kotak-starrocks-datasource/*]
+pr:
+  paths:
+    include: [plugins/kotak-starrocks-datasource/*]
+
+parameters:
+  - name: publish
+    type: boolean
+    default: false
+
+pool:
+  name: CI_Shared_Linux
+
+steps:
+  - template: templates/build-plugin-steps.yml
+    parameters:
+      pluginDir: plugins/kotak-starrocks-datasource
+      pluginId: kotak-starrocks-datasource
+      hasBackend: true
+      publish: ${{ parameters.publish }}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+package/
+artifacts/
+.eslintcache
+*.log
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+dev/e2e/.state/
+.idea

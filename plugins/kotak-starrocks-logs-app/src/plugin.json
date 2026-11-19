@@ -1,0 +1,43 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "app",
+  "name": "StarRocks Logs Drilldown",
+  "id": "kotak-starrocks-logs-app",
+  "autoEnabled": true,
+  "info": {
+    "description": "Logs Drilldown for StarRocks log views: services, log volume, labels, fields, patterns and trace links, without writing SQL. Queries run as the signed-in user through kotak-starrocks-datasource.",
+    "author": {
+      "name": "Kotak Observability"
+    },
+    "keywords": ["starrocks", "logs", "drilldown", "app"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [],
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "includes": [
+    {
+      "type": "page",
+      "name": "StarRocks Logs",
+      "path": "/a/%PLUGIN_ID%/explore",
+      "role": "Viewer",
+      "addToNav": true,
+      "defaultNav": true
+    }
+  ],
+  "dependencies": {
+    "grafanaDependency": ">=12.0.0",
+    "plugins": [
+      {
+        "id": "kotak-starrocks-datasource",
+        "type": "datasource",
+        "name": "StarRocks (IDAM identity)",
+        "version": ">=0.1.0"
+      }
+    ]
+  }
+}

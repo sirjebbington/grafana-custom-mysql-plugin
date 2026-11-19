@@ -1,0 +1,42 @@
+# Synthetic sample with the same shape as deploy-config grafana-values.yml (tenant names are made up).
+grafana:
+  datasources:
+    datasources.yaml:
+      datasources:
+        - name: alpha_public_logs
+          uid: app0001_ds_loki_alpha_public
+          type: loki
+          orgId: 3
+          jsonData:
+            httpHeaderName1: X-Scope-OrgID
+          secureJsonData:
+            httpHeaderValue1: app-0001-alpha
+        - name: beta_public_logs
+          uid: app0002_ds_loki_beta_public
+          type: loki
+          orgId: 3
+          jsonData:
+            derivedFields:
+              - name: TraceID
+                datasourceUid: 'app0002_ds_tempo_beta_public'
+                matcherRegex: "trace_id=(\\w+)"
+                urlDisplayLabel: 'View Trace'
+            httpHeaderName1: X-Scope-OrgID
+          secureJsonData:
+            httpHeaderValue1: app-0002-platform-beta
+        - name: beta_public_logs_org4
+          uid: app0002_ds_loki_beta_public_o4
+          type: loki
+          orgId: 4
+          jsonData:
+            httpHeaderName1: X-Scope-OrgID
+          secureJsonData:
+            httpHeaderValue1: app-0002-platform-beta
+        - name: app-logs-starrocks-db
+          uid: app-logs-starrocks-db
+          type: kotak-starrocks-datasource
+          orgId: 3
+        - name: beta_public_traces
+          uid: app0002_ds_tempo_beta_public
+          type: tempo
+          orgId: 3

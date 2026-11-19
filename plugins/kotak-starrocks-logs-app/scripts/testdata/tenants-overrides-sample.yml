@@ -1,0 +1,8 @@
+# Settings that are not in the Loki data sources (synthetic sample).
+default:
+  level: { source: column }
+app_0001_alpha:
+  level: { source: message }
+  trace: { regex: 'traceid=([0-9a-f]{32})', tempoUid: app0001_ds_tempo_alpha_public }
+  patterns:
+    - { name: Upstream timed out, like: '%upstream timed out%' }

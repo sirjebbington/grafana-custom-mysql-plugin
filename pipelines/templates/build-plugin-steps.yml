@@ -1,0 +1,110 @@
+# Shared build steps for the two plugin folders (plugins/<plugin-id>/). For the org repo, merge into the org's
+# pipelines/templates/build-steps.yml: the change is a pluginDir working directory and a hasBackend switch
+# around the Go steps. Everything else (npm mirror auth, Node selection, signing, checksum, artifact, Universal
+# Package publish, security attestation from cicd-templates) stays as it is today.
+#
+# Verified locally (docs/MONOREPO.md): the same steps build, test, package and verify both plugins.
+parameters:
+  - name: pluginDir # plugins/kotak-starrocks-datasource | plugins/kotak-starrocks-logs-app
+    type: string
+  - name: pluginId
+    type: string
+  - name: hasBackend # true for the datasource (Go binary), false for the app
+    type: boolean
+    default: false
+  - name: nodeVersion
+    type: string
+    default: '22.x'
+  - name: goVersion
+    type: string
+    default: '1.25.0'
+  - name: sign
+    type: boolean
+    default: false
+  - name: publish
+    type: boolean
+    default: false
+
+steps:
+  - checkout: self
+
+  - task: NodeTool@0
+    inputs:
+      versionSpec: ${{ parameters.nodeVersion }}
+  - ${{ if eq(parameters.hasBackend, true) }}:
+      - task: GoTool@0
+        inputs:
+          version: ${{ parameters.goVersion }}
+
+  - script: |
+      set -euo pipefail
+      v=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n1)
+      echo "plugin ${{ parameters.pluginId }} version $v"
+      echo "##vso[task.setvariable variable=pluginVersion]$v"
+    workingDirectory: ${{ parameters.pluginDir }}
+    displayName: Read plugin version
+
+  # In a monorepo, release tags are per plugin: <plugin-id>/v<version> (adjust the org's
+  # requireTagMatchesVersion check to strip the prefix and read ${{ parameters.pluginDir }}/package.json).
+
+  - script: npm ci --no-audit --no-fund
+    workingDirectory: ${{ parameters.pluginDir }}
+    displayName: Install npm dependencies
+
+  - script: |
+      set -euo pipefail
+      npm run typecheck
+      npm run lint
+      npm run test:ci
+    workingDirectory: ${{ parameters.pluginDir }}
+    displayName: Frontend typecheck, lint, tests
+
+  - ${{ if eq(parameters.hasBackend, true) }}:
+      - script: |
+          set -euo pipefail
+          go vet ./...
+          go test ./pkg/...
+        workingDirectory: ${{ parameters.pluginDir }}
+        displayName: Backend tests
+
+  - script: npm run build
+    workingDirectory: ${{ parameters.pluginDir }}
+    displayName: Build frontend
+
+  - ${{ if eq(parameters.hasBackend, true) }}:
+      - script: ./scripts/build-backend.sh
+        workingDirectory: ${{ parameters.pluginDir }}
+        displayName: Build backend (linux amd64 + arm64)
+
+  - ${{ if eq(parameters.sign, true) }}:
+      - script: npx --yes @grafana/sign-plugin@latest --rootUrls "$(signRootUrls)"
+        workingDirectory: ${{ parameters.pluginDir }}
+        displayName: Sign plugin (private signature)
+        env:
+          GRAFANA_ACCESS_POLICY_TOKEN: $(GRAFANA_ACCESS_POLICY_TOKEN)
+
+  # Each plugin folder has its own scripts/package.sh and verify-package.sh with the same output contract
+  # (package/<id>-<version>.zip with a top-level <id>/ folder + .sha256); the datasource's also check the binaries.
+  - script: |
+      set -euo pipefail
+      ./scripts/package.sh
+      ./scripts/verify-package.sh
+      mkdir -p "$(Build.ArtifactStagingDirectory)/package"
+      cp package/*.zip package/*.sha256 "$(Build.ArtifactStagingDirectory)/package/"
+    workingDirectory: ${{ parameters.pluginDir }}
+    displayName: Package and verify
+
+  - publish: $(Build.ArtifactStagingDirectory)/package
+    artifact: ${{ parameters.pluginId }}-zip
+
+  - ${{ if eq(parameters.publish, true) }}:
+      - task: UniversalPackages@0
+        displayName: Publish Universal Package
+        inputs:
+          command: publish
+          publishDirectory: $(Build.ArtifactStagingDirectory)/package
+          feedsToUsePublish: internal
+          vstsFeedPublish: Observability
+          vstsFeedPackagePublish: ${{ parameters.pluginId }}
+          versionOption: custom
+          versionPublish: $(pluginVersion)

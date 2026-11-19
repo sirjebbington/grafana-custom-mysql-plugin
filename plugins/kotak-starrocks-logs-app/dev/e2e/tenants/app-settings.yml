@@ -1,0 +1,5 @@
+# Other jsonData keys of the e2e app (short ranges: the seed spans 4 hours).
+viewPrefix: vw_eks_app_logs_
+defaultTimeRange: now-1h
+maxScanHours: 3
+lineLimit: 1000
