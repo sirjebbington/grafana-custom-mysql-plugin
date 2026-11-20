@@ -71,6 +71,25 @@ export function timeFilter(): string {
   return `$__timeFilter(${T})`;
 }
 
+/**
+ * Exact time bounds for line queries, in addition to $__timeFilter (which the datasource truncates to whole
+ * seconds; at ~1.6k lines/s that would skip lines when "load more" asks for lines older than the oldest one
+ * shown). Inclusive of the whole millisecond at both ends: lines equal to a loaded line are merged by id.
+ * FROM_UNIXTIME uses the session time zone, like the macro.
+ */
+export function preciseTimeBounds(fromMs: number, toMs: number): string[] {
+  const at = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    return `microseconds_add(FROM_UNIXTIME(${s}), ${(ms - s * 1000) * 1000})`;
+  };
+  return [`${T} >= ${at(Math.floor(fromMs))}`, `${T} < ${at(Math.floor(toMs) + 1)}`];
+}
+
+/** Time range to send with a line query so that $__timeFilter covers the exact bounds (whole seconds). */
+export function widenToSeconds(fromMs: number, toMs: number): { fromMs: number; toMs: number } {
+  return { fromMs: Math.floor(fromMs / 1000) * 1000, toMs: Math.ceil((Math.floor(toMs) + 1) / 1000) * 1000 };
+}
+
 export function bucketExpr(bucketSeconds: number): string {
   const b = Math.max(1, Math.floor(bucketSeconds));
   return `(UNIX_TIMESTAMP(${T}) DIV ${b}) * ${b}`;
@@ -285,11 +304,18 @@ export function serviceSamplesQuery(
     .join('\nUNION ALL\n');
 }
 
-export function logsQuery(spec: QuerySpec, ctx: BuildContext, limit: number, sort: 'desc' | 'asc'): string {
+export function logsQuery(
+  spec: QuerySpec,
+  ctx: BuildContext,
+  limit: number,
+  sort: 'desc' | 'asc',
+  bounds?: { fromMs: number; toMs: number }
+): string {
+  const extra = bounds ? preciseTimeBounds(bounds.fromMs, bounds.toMs) : [];
   return [
     `SELECT ${lineSelect(ctx)}`,
     from(spec.view),
-    `WHERE ${whereClause(spec, ctx)}`,
+    `WHERE ${whereClause(spec, ctx, { extra })}`,
     `ORDER BY ${T} ${sort === 'asc' ? 'ASC' : 'DESC'}`,
     `LIMIT ${Math.max(1, Math.floor(limit))}`,
   ].join('\n');

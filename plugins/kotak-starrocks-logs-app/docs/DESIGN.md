@@ -64,7 +64,8 @@ StarRocks prune hourly partitions; verified on UAT: 2/2521 partitions for 1 h).
 | Columns | `SELECT * FROM <view> LIMIT 0` |
 | Service grid volumes | `SELECT bucket t, <label> v, <level> lvl, COUNT(*) … GROUP BY t, v, lvl` (all services) |
 | Service grid lines | `(SELECT … WHERE <label>='a' ORDER BY ts DESC LIMIT 10) UNION ALL (…)` for the page |
-| Logs | `SELECT ts, CAST(ts AS VARCHAR) __ts, message, <level> detected_level, <columns> … ORDER BY ts DESC LIMIT n` |
+| Logs | `SELECT ts, CAST(ts AS VARCHAR) __ts, message, <level> detected_level, <columns> … AND ts >= <from µs> AND ts < <to + 1 ms µs> ORDER BY ts DESC LIMIT n` |
+| Values of a label (filter combobox) | `SELECT <col> v, COUNT(*) c … GROUP BY v ORDER BY c DESC LIMIT 200`, under the other label filters |
 | Log volume | `SELECT bucket t, <level> g, COUNT(*) … GROUP BY t, g` |
 | Labels / Fields overview | one scan: `GROUP BY GROUPING SETS ((t, a), (t, b), …)` with `GROUPING_ID` |
 | Value breakdown | `SELECT bucket t, <col> v, COUNT(*) … GROUP BY t, v` (top 30 shown) |
@@ -79,6 +80,42 @@ Application Logs dashboard plus glog letters), or for message tenants
 Line search: case-insensitive `lower(message) LIKE '%text%'` by default; `instr()` when the text contains
 `%`, `_` or `\` (StarRocks 4.0 does not match an escaped `\%` at the end of a LIKE pattern, found in the
 local tests); `regexp(message, '(?i)…')` for regex searches.
+
+## Screens and state
+
+- **Header** (like Logs Drilldown): left, the "Filter by label values" combobox, a Scenes `AdHocFiltersVariable`
+  (`layout: combobox`) whose keys are the view's label and field columns and whose values come from the query
+  above; right, Data source, View, time range (quick ranges 5 minutes to 24 hours) and refresh. Below about
+  1350 px of content the right group wraps under the filters.
+- **Service grid** ("selection" page): one tab per label (the service label, shown as "service", plus tabs
+  added with "Add label"); each value has its volume by level (legend table with totals), its newest lines,
+  ★, Include / Remove (a `=` filter on that label; several values of one label become `IN (…)`) and
+  Show logs. The grid ignores filters on its own label, so Include does not re-run it.
+- **Logs page** ("details"): "Log levels" select, line search, then the Logs / Labels / Fields / Patterns tabs.
+- **URL**: `ds`, `view`, `page`, `label`, `tabs`, `var-filters` (Scenes format), `level`, `line`, `pattern`,
+  `field`, `tab`, `breakdown`, `sort`, `limit`, `display`, `wrap`, `search`, `from`, `to`. Page, tab, view and
+  data source changes add browser history steps. `filter=` (0.1.0/0.2.0) is read and converted.
+- **Choosing a view**: the URL's view if the user can read it, else the last view used in this browser (same
+  data source), else the first. An empty or missing `view` in a URL update never clears the selection, and the
+  body re-selects a view if it ever finds none while views exist. Last selection and favourites are kept in
+  `localStorage` (per browser; failures are ignored).
+
+## Infinite scroll
+
+Grafana's Logs panel (`enableInfiniteScrolling`) asks the data source for more lines when the user scrolls to
+the end: for newest-first it re-runs the same query with the range `[from, time of the oldest line shown]` and
+merges the result, dropping lines whose time and `id` it already has. Two details make the pages join exactly:
+
+1. **Exact bounds.** `$__timeFilter` is truncated to whole seconds, which would repeat or skip lines inside a
+   second. The logs query therefore also has `ts >= microseconds_add(FROM_UNIXTIME(s), µs)` and
+   `ts < <to + 1 ms>` (the panel's times are milliseconds; the line at the boundary millisecond is fetched
+   again and removed by id). The macro range is widened to whole seconds around those bounds, so partition
+   pruning still applies.
+2. **Stable ids.** A line's id is `<µs timestamp>_<pod uid or name>_<FNV-1a of the message>` (with `#n` for
+   identical lines in the same microsecond), the same in every query, so the overlap is recognised.
+
+The smoke test `infinite scroll` checks on StarRocks that two pages equal one larger query (no gaps, overlap
+only at the boundary millisecond); the browser test scrolls past 1000 lines.
 
 ## Safety
 
@@ -97,10 +134,14 @@ local tests); `regexp(message, '(?i)…')` for regex searches.
 | Range > `maxScanHours`, level read from the message, no text filters | volumes run **without** the level split (cheap), with a notice and "split anyway" |
 | Range > `maxScanHours` and a line / field / pattern / message-level filter, or the Patterns tab | a notice with "Use the last N hours" and "Run anyway" (remembered for that range) |
 
-Queries per screen: service grid 2, Logs tab 2, Labels/Fields 1 (+1 sample for message fields),
-Patterns 1. Superseded requests are cancelled by Scenes.
+Queries per screen: service grid 2, Logs tab 2 (+1 per infinite-scroll page), Labels/Fields 1 (+1 sample for
+message fields), Patterns 1, values dropdown 1 when opened. Superseded requests are cancelled by Scenes. The
+time picker offers quick ranges up to 24 hours (longer ranges can still be typed; the guardrails above apply).
 
 ## Known limitations
+
+- Infinite scroll works in the Logs display; Table and JSON show the first `lineLimit` lines.
+- Favourites and the last view are per browser (`localStorage`), not per Grafana user.
 
 - "Open in Explore" opens the SQL in Explore; Explore shows a table because the datasource returns table
   frames (a logs view there would need a datasource change).

@@ -5,7 +5,7 @@ Two Grafana plugins, built and released separately from one repository.
 | Folder | Plugin | What it is |
 |---|---|---|
 | [`plugins/kotak-starrocks-datasource`](plugins/kotak-starrocks-datasource) | `kotak-starrocks-datasource` | Backend data source (Go + React). Queries StarRocks **as the signed-in user** by forwarding their IDAM JWT, so Ranger enforces per-user access. In UAT/prod. |
-| [`plugins/kotak-starrocks-logs-app`](plugins/kotak-starrocks-logs-app) | `kotak-starrocks-logs-app` | Frontend-only app: a **Logs Drilldown for StarRocks** log views (`vw_eks_app_logs_<app_id>`), with a picker for the data source (one per StarRocks database) and the view. Sends all queries through the data source above, unchanged. |
+| [`plugins/kotak-starrocks-logs-app`](plugins/kotak-starrocks-logs-app) | `kotak-starrocks-logs-app` | Frontend-only app **Logs Drilldown (StarRocks)**: the Logs Drilldown experience for StarRocks log views (`vw_eks_app_logs_<app_id>`), with a picker for the data source (one per StarRocks database) and the view. Sends all queries through the data source above, unchanged. |
 
 ```mermaid
 flowchart LR
@@ -34,5 +34,5 @@ scripts/build-plugin.sh plugins/kotak-starrocks-logs-app     # npm tests, fronte
 
 Each plugin's own README covers development and end-to-end tests. Org rollout instructions for the app (for
 the Claude session on the org PC): [`ORG_AGENT_PROMPT.md`](plugins/kotak-starrocks-logs-app/docs/ORG_AGENT_PROMPT.md)
-(0.1.0), then [`ORG_AGENT_PROMPT_2_DATASOURCE_PICKER.md`](plugins/kotak-starrocks-logs-app/docs/ORG_AGENT_PROMPT_2_DATASOURCE_PICKER.md)
-(0.2.0, data source picker).
+(0.1.0), then [`ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md`](plugins/kotak-starrocks-logs-app/docs/ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md)
+(0.1.0 → 0.3.0 in one patch: data source picker and the Logs Drilldown look; supersedes prompt 2).

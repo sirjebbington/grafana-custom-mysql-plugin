@@ -25,7 +25,7 @@ const EXAMPLE: AppJsonData = {
 };
 
 /**
- * Configuration page (Administration > Plugins > StarRocks Logs Drilldown). Shows the effective
+ * Configuration page (Administration > Plugins > Logs Drilldown (StarRocks)). Shows the effective
  * configuration and its validation errors. Settings are normally provisioned from deploy-config
  * (provisioning/plugins); saving here changes them until the next provisioning run.
  */

@@ -39,6 +39,7 @@ import {
   serviceVolumeQuery,
   valueBreakdownQuery,
   volumeQuery,
+  widenToSeconds,
 } from '../sql/builder';
 import { QueryKind, QueryParams, QuerySpec } from '../state/types';
 import { fetchColumns, runSql } from './api';
@@ -101,7 +102,11 @@ export function buildSql(q: LogsAppQuery, ctx: BuildContext, range: TimeRange): 
       return volumeQuery(q.spec, ctx, bucket, p.withLevel ?? true);
     case 'logs':
     case 'table':
-      return logsQuery(q.spec, ctx, p.limit ?? config.lineLimit, p.sort ?? 'desc');
+      // exact bounds: "load more" (infinite scrolling) asks for lines older/newer than a loaded line
+      return logsQuery(q.spec, ctx, p.limit ?? config.lineLimit, p.sort ?? 'desc', {
+        fromMs: range.from.valueOf(),
+        toMs: range.to.valueOf(),
+      });
     case 'labelOverview':
       return labelOverviewQuery(q.spec, ctx, p.labels ?? ctx.labels, bucket);
     case 'valueBreakdown':
@@ -144,12 +149,19 @@ function errorResponse(refId: string, err: unknown): DataQueryResponse {
   return { data: [], errors: [e], error: e, state: LoadingState.Error };
 }
 
+function widenedRange(range: TimeRange): TimeRange {
+  const w = widenToSeconds(range.from.valueOf(), range.to.valueOf());
+  return { from: dateTime(w.fromMs), to: dateTime(w.toMs), raw: { from: dateTime(w.fromMs), to: dateTime(w.toMs) } };
+}
+
 /** Runs one structured query and returns frames ready for the panels. */
 export function runLogsQuery(q: LogsAppQuery, range: TimeRange, requestId?: string): Observable<DataQueryResponse> {
   return from(buildContext(q.spec.view, range, q.spec.datasource)).pipe(
     switchMap((ctx) => {
       const sql = buildSql(q, ctx, range);
-      return runSql(sql, { datasource: q.spec.datasource, refId: q.refId, range, requestId }).pipe(
+      // line queries have exact bounds in the SQL; widen the range for $__timeFilter to whole seconds
+      const sqlRange = q.kind === 'logs' || q.kind === 'table' ? widenedRange(range) : range;
+      return runSql(sql, { datasource: q.spec.datasource, refId: q.refId, range: sqlRange, requestId }).pipe(
         map((res): DataQueryResponse => {
           const err = res.errors?.[0] ?? res.error;
           if (err) {

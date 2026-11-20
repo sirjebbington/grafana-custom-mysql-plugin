@@ -2,6 +2,8 @@ import { DataFrameType, FieldType, createDataFrame, dateTime } from '@grafana/da
 
 import { resolveConfig, resolveTenant } from '../config/config';
 import {
+  fnv1a,
+  stableIds,
   toLabelOverviewFrames,
   toLogsFrame,
   toPatternFrames,
@@ -119,5 +121,21 @@ describe('series frames', () => {
       ],
     });
     expect(toPatternFrames(src, range, 60, 'A').map((f) => f.name)).toEqual([UNMATCHED, 'timeout']);
+  });
+});
+
+describe('line ids', () => {
+  it('are stable across queries (infinite scroll merges pages by id) and unique within a frame', () => {
+    const a = toLogsFrame(lines, { tenant: tenant(false), refId: 'A' });
+    const b = toLogsFrame(lines, { tenant: tenant(false), refId: 'B' });
+    const ids = a.fields.find((f) => f.name === 'id')!.values;
+    expect(b.fields.find((f) => f.name === 'id')!.values).toEqual(ids);
+    expect(ids[0]).toBe(`1970-01-01 00:00:02.000123_u1_${fnv1a(lines.fields[2].values[0])}`);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('suffix duplicates', () => {
+    expect(stableIds(['x', 'y', 'x', 'x'])).toEqual(['x', 'y', 'x#1', 'x#2']);
+    expect(fnv1a('')).toBe('811c9dc5');
   });
 });

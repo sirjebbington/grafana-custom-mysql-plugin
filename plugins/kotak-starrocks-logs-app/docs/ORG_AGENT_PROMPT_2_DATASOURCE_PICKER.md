@@ -1,5 +1,8 @@
 # Prompt for the org Claude session, edit 2: data source picker (app 0.2.0)
 
+> **Superseded** by [`ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md`](ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md), which upgrades
+> 0.1.0 → 0.3.0 in one patch (this data source picker plus the Logs Drilldown look). Kept for reference.
+
 Copy everything below the line into Claude Code on the org PC, after edit 1 (`ORG_AGENT_PROMPT.md`, app 0.1.0)
 is rolled out. Fill in the **INPUTS** block first.
 

@@ -68,7 +68,8 @@ export class LogsTabScene extends SceneObjectBase<LogsTabState> {
       main = logsPanel(api, queryRunner('logs', spec, { limit, sort }), {
         sort,
         wrap,
-        title: `Logs (newest ${limit})`,
+        // the line limit is the page size: scrolling to the end loads the next page
+        title: 'Logs',
       });
     }
     this.setState({ volume, main });

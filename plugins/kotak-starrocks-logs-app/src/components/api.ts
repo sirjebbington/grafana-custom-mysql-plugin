@@ -1,5 +1,6 @@
-import { SceneObject } from '@grafana/scenes';
+import { AdHocFiltersVariable, SceneObject } from '@grafana/scenes';
 
+import { getAppConfig } from '../config/config';
 import { BuildContext } from '../sql/builder';
 import { LabelFilter, LineFilter, MessageFieldFilter, PatternFilter, QuerySpec } from '../state/types';
 
@@ -14,7 +15,12 @@ export interface ExplorationApi {
   getDisplay(): { display: Display; sort: 'desc' | 'asc'; limit: number; wrap: boolean };
   setDisplay(d: Partial<{ display: Display; sort: 'desc' | 'asc'; limit: number; wrap: boolean }>): void;
   addFilter(f: LabelFilter): void;
+  removeLabelFilter(key: string, value: string): void;
   hasFilter(key: string, value: string, op?: LabelFilter['op']): boolean;
+  /** the "Filter by label values" combobox (source of truth for label filters) */
+  getLabelFiltersVariable(): AdHocFiltersVariable;
+  /** go from the value grid to the logs with the current filters */
+  showLogs(): void;
   setLevels(levels: string[]): void;
   addLineFilter(f: LineFilter): void;
   togglePatternFilter(name: string, op: PatternFilter['op']): void;
@@ -41,4 +47,9 @@ export function getExploration(obj: SceneObject): ExplorationApi {
     cur = cur.parent;
   }
   throw new Error('LogsExploration not found');
+}
+
+/** Name shown for a label: the service label is "service", like Logs Drilldown. */
+export function displayLabel(label: string): string {
+  return label === getAppConfig().serviceLabel ? 'service' : label;
 }

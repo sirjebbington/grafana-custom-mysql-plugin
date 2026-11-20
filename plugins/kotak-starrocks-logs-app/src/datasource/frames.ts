@@ -73,11 +73,12 @@ export function toLogsFrame(frame: DataFrame, opts: LogsFrameOptions): DataFrame
     { name: 'timestamp', type: FieldType.time, config: {}, values: rows.map((i) => ts[i]) },
     { name: 'body', type: FieldType.string, config: {}, values: rows.map((i) => str(msg[i])) },
     { name: 'severity', type: FieldType.string, config: {}, values: rows.map((i) => str(lvl[i]) || 'unknown') },
+    // stable across responses (timestamp + pod + message), so "load more" merges overlapping lines
     {
       name: 'id',
       type: FieldType.string,
       config: {},
-      values: rows.map((i, n) => `${str(tsRaw[i])}_${labels[n][POD_UID_COLUMN] ?? ''}_${n}`),
+      values: stableIds(rows.map((i, n) => lineKey(tsRaw[i], labels[n], msg[i]))),
     },
     { name: 'labels', type: FieldType.other, config: {}, values: labels },
     // exact microsecond timestamp, used by "show context"; not shown in log details
@@ -110,6 +111,30 @@ export function toLogsFrame(frame: DataFrame, opts: LogsFrameOptions): DataFrame
       preferredVisualisationType: 'logs',
       custom: { ...frame.meta?.custom, value: opts.value },
     },
+  });
+}
+
+/** 32-bit FNV-1a hash as hex. */
+export function fnv1a(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function lineKey(tsRaw: unknown, labels: Record<string, string>, message: unknown): string {
+  return `${str(tsRaw)}_${labels[POD_UID_COLUMN] ?? labels.k8s_pod_name ?? ''}_${fnv1a(str(message))}`;
+}
+
+/** Identical keys (same line twice in the same microsecond) get a #n suffix so ids stay unique. */
+export function stableIds(keys: string[]): string[] {
+  const seen = new Map<string, number>();
+  return keys.map((k) => {
+    const n = seen.get(k) ?? 0;
+    seen.set(k, n + 1);
+    return n === 0 ? k : `${k}#${n}`;
   });
 }
 

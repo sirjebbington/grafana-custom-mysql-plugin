@@ -55,7 +55,7 @@ deploy-config pipeline (or as a check that fails when the committed file differs
 grafana.ini:
   plugins:
     allow_loading_unsigned_plugins: kotak-starrocks-datasource,kotak-starrocks-logs-app
-  # shows "StarRocks Logs Drilldown" as a card on the Drilldown page next to Metrics / Logs / Traces
+  # shows "Logs Drilldown (StarRocks)" as a card on the Drilldown page next to Metrics / Logs / Traces
   navigation.app_sections:
     kotak-starrocks-logs-app: drilldown 5
 ```
@@ -96,21 +96,25 @@ extraConfigmapMounts:
 
 Without the provisioning file the app still works (it is `autoEnabled`) with defaults
 (`datasourceUid: app-logs-starrocks-db`, levels from the column, no trace links, no patterns); a Grafana
-admin can then set the JSON on Administration → Plugins → StarRocks Logs Drilldown → Configuration.
+admin can then set the JSON on Administration → Plugins → Logs Drilldown (StarRocks) → Configuration.
 
 3. Run `pipelines/grafana-deploy.yml` (the init container runs on pod start).
 
 ## 3. Check
 
 - `kubectl -n <ns> logs <grafana-pod> -c s3-sync-init` shows the new plugin copied.
-- Drilldown page shows the StarRocks card; the view picker lists only the user's views.
+- Drilldown page shows the "Logs Drilldown (StarRocks)" card; the app opens on a view the user can read
+  (the last one used in that browser, else the first), and the View picker lists only the user's views.
+- On the service grid: Include adds a filter in the "Filter by label values" box; the values dropdown in that
+  box lists values; scrolling to the end of the logs loads more than `lineLimit` lines.
 - On the configuration page, "Effective configuration" shows the tenants and no warnings.
 - A trace link from the observability view opens Explore with the Tempo data source.
 
 ## Load on StarRocks
 
 Per screen the app issues 1–3 queries (service grid: 2; Logs tab: 2; Labels/Fields/Patterns: 1 each),
-plus one per filter value lookup. On the UAT observability view (5.6 M rows/hour) newest-N queries take
+plus one per filter value lookup and one per infinite-scroll page (a newest-N query, cheap). The time picker's
+quick ranges stop at 24 hours. On the UAT observability view (5.6 M rows/hour) newest-N queries take
 ~0.15 s at any range, 1 h aggregates ~0.2 s, 24 h aggregates 3–4 s, and 24 h text scans 9–11 s on the single
 CN. Ask the StarRocks team for a resource group / concurrency limit for interactive Grafana users before a
 wide rollout.

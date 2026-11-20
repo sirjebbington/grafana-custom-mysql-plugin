@@ -16,6 +16,7 @@ import {
   valueBreakdownQuery,
   viewsQuery,
   volumeQuery,
+  widenToSeconds,
 } from '../../src/sql/builder';
 import { DEFAULT_FIELDS, DEFAULT_LABELS } from '../../src/constants';
 import { emptySpec, QuerySpec } from '../../src/state/types';
@@ -189,6 +190,32 @@ describe('every query kind runs on StarRocks (observability view, level from mes
     expect(String(rows[0].__ts)).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{6}$/);
     expect(Number(rows[0].observed_timestamp)).toBeGreaterThanOrEqual(Number(rows[49].observed_timestamp));
     expect(rows[0]).toHaveProperty('k8s_pod_uid');
+  });
+
+  it('infinite scroll: the next page (up to the oldest line shown) joins the first, no gaps, overlap deduped', async () => {
+    // what the Logs panel does: page 1 over [from, to]; page 2 over [from, oldest line of page 1 in ms]
+    const toMs = Date.now();
+    const fromMs = toMs - 3_600_000;
+    const page = async (to: number, limit: number) => {
+      const w = widenToSeconds(fromMs, to);
+      return e2e.sql(logsQuery(spec(OBS), c, limit, 'desc', { fromMs, toMs: to }), String(w.fromMs), String(w.toMs));
+    };
+    const key = (r: Record<string, unknown>) => `${r.__ts}|${r.k8s_pod_uid}|${r.message}`;
+    const p1 = await page(toMs, 1000);
+    expect(p1).toHaveLength(1000);
+    const oldest1 = Number(p1[999].observed_timestamp);
+    const p2 = await page(oldest1, 1000);
+    expect(p2).toHaveLength(1000);
+    // page 2 starts within the last millisecond of page 1 (the overlap is removed by line id)
+    expect(Number(p2[0].observed_timestamp)).toBeLessThanOrEqual(oldest1 + 1);
+    const merged = new Map([...p1, ...p2].map((r) => [key(r), r]));
+    expect(merged.size).toBeGreaterThan(1500);
+    // no gap: every line of one 2500-line query down to page 2's oldest millisecond is in the two pages
+    const oldest2 = Number(p2[999].observed_timestamp);
+    const all = await page(toMs, 2500);
+    const expected = all.filter((r) => Number(r.observed_timestamp) > oldest2);
+    expect(expected.length).toBeGreaterThan(1500);
+    expect(expected.filter((r) => !merged.has(key(r)))).toEqual([]);
   });
 
   it('glog, logfmt, JSON and upper-case levels are normalised', async () => {

@@ -1,4 +1,4 @@
-# StarRocks Logs Drilldown
+# Logs Drilldown (StarRocks)
 
 Explore StarRocks log views (`vw_eks_app_logs_*`) like Grafana Logs Drilldown, without writing SQL:
 

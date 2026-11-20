@@ -13,11 +13,13 @@ import {
   needsMessageScan,
   patternsQuery,
   pickBucketSeconds,
+  preciseTimeBounds,
   quoteIdent,
   serviceSamplesQuery,
   serviceVolumeQuery,
   volumeQuery,
   whereClause,
+  widenToSeconds,
 } from './builder';
 
 const VIEW = 'vw_eks_app_logs_app_1961_observability';
@@ -208,6 +210,25 @@ describe('queries', () => {
     expect(q).toContain('`k8s_pod_uid`');
     expect(q).toContain('ORDER BY `observed_timestamp` ASC');
     expect(q).toContain('LIMIT 1000');
+  });
+
+  it('logs query with bounds adds exact microsecond bounds (infinite scroll pages must not skip or repeat lines)', () => {
+    // 2026-11-20 10:00:00.250 .. 10:05:00.999
+    const q = logsQuery(spec(), ctx(), 1000, 'desc', { fromMs: 1_763_632_800_250, toMs: 1_763_633_100_999 });
+    expect(q).toContain('$__timeFilter(`observed_timestamp`)');
+    expect(q).toContain('`observed_timestamp` >= microseconds_add(FROM_UNIXTIME(1763632800), 250000)');
+    // the end is inclusive to the millisecond: < end + 1 ms
+    expect(q).toContain('`observed_timestamp` < microseconds_add(FROM_UNIXTIME(1763633101), 0)');
+  });
+
+  it('precise bounds and the widened macro range', () => {
+    expect(preciseTimeBounds(1000.7, 2999)).toEqual([
+      '`observed_timestamp` >= microseconds_add(FROM_UNIXTIME(1), 0)',
+      '`observed_timestamp` < microseconds_add(FROM_UNIXTIME(3), 0)',
+    ]);
+    // the macro truncates to seconds, so its range is widened to whole seconds around [from, to + 1 ms)
+    expect(widenToSeconds(1250, 4999)).toEqual({ fromMs: 1000, toMs: 5000 });
+    expect(widenToSeconds(1250, 5000)).toEqual({ fromMs: 1000, toMs: 6000 });
   });
 
   it('label overview uses GROUPING SETS over present labels', () => {

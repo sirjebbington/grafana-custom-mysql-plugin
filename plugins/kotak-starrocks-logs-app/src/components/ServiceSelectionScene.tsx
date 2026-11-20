@@ -10,11 +10,12 @@ import {
   VizPanel,
   sceneGraph,
 } from '@grafana/scenes';
-import { Alert, Button, Icon, Input, Select, useStyles2 } from '@grafana/ui';
+import { Alert, Button, Icon, IconButton, Pagination, Select, Tooltip, useStyles2 } from '@grafana/ui';
 
 import { runLogsQuery } from '../datasource/StarRocksLogsDataSource';
+import { getFavorites, toggleFavorite } from '../state/storage';
 import { QuerySpec } from '../state/types';
-import { getExploration } from './api';
+import { displayLabel, getExploration } from './api';
 import { barsPanel, queryRunner, staticData } from './panels';
 import { ErrorBox, Loading, SampleList } from './ui';
 
@@ -24,6 +25,7 @@ interface ServiceValue {
 }
 
 export interface ServiceSelectionState extends SceneObjectState {
+  /** label filters except those on `label` (the grid shows every value of its own label) */
   spec: QuerySpec;
   label: string;
   search: string;
@@ -32,6 +34,7 @@ export interface ServiceSelectionState extends SceneObjectState {
   page: number;
   pageSize: number;
   values?: ServiceValue[];
+  favorites: string[];
   panels: VizPanel[];
   samples: Record<string, DataFrame>;
   samplesLoading?: boolean;
@@ -39,24 +42,29 @@ export interface ServiceSelectionState extends SceneObjectState {
   $data: SceneQueryRunner;
 }
 
+export const PAGE_SIZES = [10, 20, 50, 100];
+const DEFAULT_PAGE_SIZE = 20;
+
 /**
- * Landing view after a view is picked: one row per value of the grouping label (k8s_service_name by default)
- * with its log volume by level and its newest lines. Volumes for all values come from one GROUP BY query;
- * the newest lines for the visible page come from one UNION ALL query.
+ * Landing view after a view is picked, like Logs Drilldown's service selection: one row per value of the
+ * grouping label (the service by default) with its volume by level, favourite / Include / Show logs buttons
+ * and its newest lines. Volumes for all values come from one GROUP BY query; the newest lines of the
+ * visible page come from one UNION ALL query.
  */
 export class ServiceSelectionScene extends SceneObjectBase<ServiceSelectionState> {
   static Component = ServiceSelectionRenderer;
   private samplesSub?: Unsubscribable;
 
   constructor(
-    state: Omit<ServiceSelectionState, '$data' | 'panels' | 'samples' | 'page' | 'pageSize'> &
+    state: Omit<ServiceSelectionState, '$data' | 'panels' | 'samples' | 'page' | 'pageSize' | 'favorites'> &
       Partial<ServiceSelectionState>
   ) {
     super({
       page: 0,
-      pageSize: 10,
+      pageSize: DEFAULT_PAGE_SIZE,
       panels: [],
       samples: {},
+      favorites: getFavorites(state.spec.datasource, state.spec.view, state.label),
       $data: queryRunner('serviceVolume', state.spec, { label: state.label, withLevel: state.withLevel }),
       ...state,
     });
@@ -84,9 +92,14 @@ export class ServiceSelectionScene extends SceneObjectBase<ServiceSelectionState
       const v = String(f.meta?.custom?.value ?? '');
       totals.set(v, (totals.get(v) ?? 0) + Number(f.meta?.custom?.total ?? 0));
     }
+    // favourites first (as of loading: starring a value does not move rows around), then by volume
+    const fav = new Set(this.state.favorites);
     const values = Array.from(totals.entries())
       .map(([value, total]) => ({ value, total }))
-      .sort((a, b) => b.total - a.total || a.value.localeCompare(b.value));
+      .sort(
+        (a, b) =>
+          Number(fav.has(b.value)) - Number(fav.has(a.value)) || b.total - a.total || a.value.localeCompare(b.value)
+      );
     this.setState({ values });
     this.buildPage();
   }
@@ -102,6 +115,9 @@ export class ServiceSelectionScene extends SceneObjectBase<ServiceSelectionState
   }
 
   setSearch(search: string) {
+    if (search === this.state.search) {
+      return;
+    }
     this.setState({ search, page: 0 });
     this.buildPage();
   }
@@ -111,12 +127,16 @@ export class ServiceSelectionScene extends SceneObjectBase<ServiceSelectionState
     this.buildPage();
   }
 
+  toggleFavorite(value: string) {
+    const { spec, label } = this.state;
+    this.setState({ favorites: toggleFavorite(spec.datasource, spec.view, label, value) });
+  }
+
   private buildPage() {
     const data = this.state.$data.state.data;
     if (!data) {
       return;
     }
-    const { label } = this.state;
     const panels = this.visible().map(({ value, total }) =>
       barsPanel(
         value === '' ? '(empty)' : value,
@@ -125,19 +145,9 @@ export class ServiceSelectionScene extends SceneObjectBase<ServiceSelectionState
           data.timeRange
         ),
         {
-          legend: false,
+          legendTable: true,
           description: `${total.toLocaleString()} lines`,
-          headerActions: (
-            <Button
-              size="sm"
-              variant="primary"
-              fill="outline"
-              data-testid={`show-logs-${value}`}
-              onClick={() => getExploration(this).selectValue(label, value)}
-            >
-              Show logs
-            </Button>
-          ),
+          headerActions: <RowActions scene={this} value={value} />,
         }
       )
     );
@@ -177,7 +187,46 @@ export class ServiceSelectionScene extends SceneObjectBase<ServiceSelectionState
   }
 }
 
-const PAGE_SIZES = [10, 20, 50].map((n) => ({ label: String(n), value: n }));
+/** Buttons in a row's header: favourite, Include / Remove (label filter), Show logs. */
+function RowActions({ scene, value }: { scene: ServiceSelectionScene; value: string }) {
+  const styles = useStyles2(getStyles);
+  const api = getExploration(scene);
+  const { label, favorites } = scene.useState();
+  // re-render when the label filters change (Include here, or the combobox)
+  api.getLabelFiltersVariable().useState();
+  const included = api.hasFilter(label, value, '=');
+  const favorite = favorites.includes(value);
+  return (
+    <span className={styles.actions}>
+      <IconButton
+        name={favorite ? 'favorite' : 'star'}
+        className={favorite ? styles.favorite : undefined}
+        tooltip={favorite ? 'Remove from favourites' : 'Add to favourites (shown first)'}
+        onClick={() => scene.toggleFavorite(value)}
+        data-testid={`favorite-${value}`}
+      />
+      <Button
+        size="sm"
+        variant="secondary"
+        fill="outline"
+        tooltip={included ? `Remove ${displayLabel(label)} = ${value} from the filters` : `Filter by ${value}`}
+        onClick={() => (included ? api.removeLabelFilter(label, value) : api.addFilter({ key: label, op: '=', value }))}
+        data-testid={`include-${value}`}
+      >
+        {included ? 'Remove' : 'Include'}
+      </Button>
+      <Button
+        size="sm"
+        variant="primary"
+        fill="outline"
+        onClick={() => api.selectValue(label, value)}
+        data-testid={`show-logs-${value}`}
+      >
+        Show logs
+      </Button>
+    </span>
+  );
+}
 
 function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectionScene>) {
   const styles = useStyles2(getStyles);
@@ -187,46 +236,54 @@ function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectio
   const filtered = model.filtered();
   const visible = model.visible();
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const name = displayLabel(label);
 
   const header = (
     <div className={styles.header}>
-      <Input
-        width={40}
-        prefix={<Icon name="search" />}
-        placeholder={`Search ${label} values`}
-        value={search}
-        onChange={(e) => getExploration(model).setSearch(e.currentTarget.value)}
-        data-testid="service-search"
-      />
-      <span className={styles.muted}>
-        Showing {visible.length} of {filtered.length}
+      <div className={styles.search} data-testid="service-search">
+        <Select
+          aria-label="Search values"
+          placeholder={`Search ${name === 'service' ? 'services' : `${name} values`}`}
+          prefix={<Icon name="search" />}
+          isClearable
+          options={filtered.slice(0, 200).map((v) => ({
+            label: v.value === '' ? '(empty)' : v.value,
+            value: v.value,
+            description: `${v.total.toLocaleString()} lines`,
+          }))}
+          value={null}
+          inputValue={search}
+          onInputChange={(text, meta) => {
+            if (meta.action === 'input-change') {
+              getExploration(model).setSearch(text);
+            }
+          }}
+          onChange={(o) => getExploration(model).setSearch(o?.value ?? '')}
+          noOptionsMessage={`No ${name} values match`}
+        />
+      </div>
+      <span className={styles.showing}>
+        Showing
+        <Select
+          width={9}
+          aria-label="Page size"
+          options={PAGE_SIZES.map((n) => ({ label: String(n), value: n }))}
+          value={pageSize}
+          onChange={(o) => o.value && model.setPage(0, o.value)}
+        />
+        of {filtered.length}
+        <Tooltip content={`Sorted by log volume in the time range; favourites (★) first.`}>
+          <Icon name="info-circle" className={styles.muted} />
+        </Tooltip>
       </span>
-      <Select
-        width={10}
-        options={PAGE_SIZES}
-        value={pageSize}
-        onChange={(o) => model.setPage(0, o.value!)}
-        aria-label="Page size"
-      />
-      <Button
-        size="sm"
-        variant="secondary"
-        icon="angle-left"
-        disabled={page === 0}
-        onClick={() => model.setPage(page - 1)}
-        aria-label="Previous page"
-      />
-      <span className={styles.muted}>
-        {page + 1} / {pages}
-      </span>
-      <Button
-        size="sm"
-        variant="secondary"
-        icon="angle-right"
-        disabled={page + 1 >= pages}
-        onClick={() => model.setPage(page + 1)}
-        aria-label="Next page"
-      />
+      <div className={styles.pagination}>
+        <Pagination
+          currentPage={page + 1}
+          numberOfPages={pages}
+          onNavigate={(p) => model.setPage(p - 1)}
+          hideWhenSinglePage
+        />
+      </div>
     </div>
   );
 
@@ -241,7 +298,7 @@ function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectio
   if (data.state === LoadingState.Error) {
     return (
       <ErrorBox
-        title="Could not load the service volumes"
+        title={`Could not load the ${name} volumes`}
         error={data.errors?.[0]?.message ?? data.error?.message ?? 'error'}
       />
     );
@@ -255,7 +312,11 @@ function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectio
           see levels.
         </Alert>
       )}
-      {filtered.length === 0 && <div className={styles.muted}>No logs in the selected time range.</div>}
+      {filtered.length === 0 && (
+        <div className={styles.muted}>
+          {search !== '' ? `No ${name} values match "${search}".` : 'No logs in the selected time range.'}
+        </div>
+      )}
       {visible.map((v, i) => {
         const panel = panels[i];
         return (
@@ -267,6 +328,11 @@ function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectio
           </div>
         );
       })}
+      {pages > 1 && (
+        <div className={styles.footer}>
+          <Pagination currentPage={page + 1} numberOfPages={pages} onNavigate={(p) => model.setPage(p - 1)} />
+        </div>
+      )}
     </div>
   );
 }
@@ -275,13 +341,25 @@ const getStyles = (theme: GrafanaTheme2) => ({
   header: css({
     display: 'flex',
     alignItems: 'center',
-    gap: theme.spacing(1),
+    gap: theme.spacing(2),
     marginBottom: theme.spacing(1),
     flexWrap: 'wrap',
   }),
+  search: css({ flex: '1 1 320px', maxWidth: 520 }),
+  showing: css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: theme.spacing(1),
+    color: theme.colors.text.secondary,
+    whiteSpace: 'nowrap',
+  }),
+  pagination: css({ marginLeft: 'auto' }),
+  footer: css({ display: 'flex', justifyContent: 'flex-end', marginTop: theme.spacing(1) }),
   muted: css({ color: theme.colors.text.secondary }),
-  row: css({ display: 'flex', gap: theme.spacing(1), height: 200, marginBottom: theme.spacing(1), minWidth: 0 }),
-  volume: css({ width: '38%', minWidth: 280, height: '100%' }),
+  actions: css({ display: 'inline-flex', alignItems: 'center', gap: theme.spacing(1) }),
+  favorite: css({ color: theme.colors.warning.main }),
+  row: css({ display: 'flex', gap: theme.spacing(1), height: 220, marginBottom: theme.spacing(1), minWidth: 0 }),
+  volume: css({ width: '42%', minWidth: 320, height: '100%' }),
   lines: css({
     flex: 1,
     minWidth: 0,

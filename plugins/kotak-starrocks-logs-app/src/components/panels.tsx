@@ -38,7 +38,13 @@ export function staticData(frames: DataFrame[], timeRange: TimeRange): SceneData
 export function barsPanel(
   title: string,
   data: SceneDataProvider | undefined,
-  opts: { headerActions?: VizPanel['state']['headerActions']; legend?: boolean; description?: string } = {}
+  opts: {
+    headerActions?: VizPanel['state']['headerActions'];
+    legend?: boolean;
+    /** legend as a table on the right with the total per series (service rows, like Logs Drilldown) */
+    legendTable?: boolean;
+    description?: string;
+  } = {}
 ): VizPanel {
   const b = PanelBuilders.timeseries()
     .setTitle(title)
@@ -47,12 +53,12 @@ export function barsPanel(
     .setCustomFieldConfig('lineWidth', 0)
     .setCustomFieldConfig('pointSize', 0)
     .setCustomFieldConfig('stacking', { mode: StackingMode.Normal, group: 'A' })
-    .setOption('legend', {
-      showLegend: opts.legend ?? true,
-      displayMode: LegendDisplayMode.List,
-      placement: 'bottom',
-      calcs: [],
-    })
+    .setOption(
+      'legend',
+      opts.legendTable
+        ? { showLegend: true, displayMode: LegendDisplayMode.Table, placement: 'right', calcs: ['sum'] }
+        : { showLegend: opts.legend ?? true, displayMode: LegendDisplayMode.List, placement: 'bottom', calcs: [] }
+    )
     .setOption('tooltip', { mode: TooltipDisplayMode.Multi, sort: SortOrder.Descending })
     .setMin(0)
     .setOverrides((o) => {
@@ -97,7 +103,8 @@ export function logsPanel(
     .setOption('wrapLogMessage', opts.wrap)
     .setOption('prettifyLogMessage', false)
     .setOption('enableLogDetails', true)
-    .setOption('enableInfiniteScrolling', false)
+    // scrolling to the end loads the next lines (the panel re-queries with a narrower time range)
+    .setOption('enableInfiniteScrolling', true)
     .setOption('showLabels', false)
     .setOption('showCommonLabels', false)
     .setOption('showLogContextToggle', true)

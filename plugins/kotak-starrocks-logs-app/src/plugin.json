@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
   "type": "app",
-  "name": "StarRocks Logs Drilldown",
+  "name": "Logs Drilldown (StarRocks)",
   "id": "kotak-starrocks-logs-app",
   "autoEnabled": true,
   "info": {
@@ -22,7 +22,7 @@
   "includes": [
     {
       "type": "page",
-      "name": "StarRocks Logs",
+      "name": "Logs Drilldown (StarRocks)",
       "path": "/a/%PLUGIN_ID%/explore",
       "role": "Viewer",
       "addToNav": true,

@@ -1,7 +1,9 @@
 import { css } from '@emotion/css';
+import { useState } from 'react';
 
 import { GrafanaTheme2, rangeUtil } from '@grafana/data';
 import {
+  AdHocFiltersVariable,
   SceneComponentProps,
   SceneObject,
   SceneObjectBase,
@@ -13,13 +15,14 @@ import {
   SceneTimePicker,
   sceneGraph,
 } from '@grafana/scenes';
-import { Alert, Button, Select, Tab, TabsBar, useStyles2 } from '@grafana/ui';
+import { Alert, Button, IconButton, InlineField, Select, Tab, TabsBar, useStyles2 } from '@grafana/ui';
 
-import { LEVELS } from '../constants';
+import { LEVELS, QUICK_RANGES, RUNTIME_DS } from '../constants';
 import { getAppConfig, getAppConfigErrors, viewPrefixFor } from '../config/config';
-import { fetchViews, listDatasources, StarRocksDatasource } from '../datasource/api';
+import { fetchViews, listDatasources, runSqlOnce, StarRocksDatasource, stringColumn } from '../datasource/api';
 import { buildContext } from '../datasource/StarRocksLogsDataSource';
-import { BuildContext, needsMessageScan } from '../sql/builder';
+import { BuildContext, labelValuesQuery, needsMessageScan } from '../sql/builder';
+import { getLastSelection, setLastSelection } from '../state/storage';
 import {
   asArray,
   decodeAll,
@@ -28,18 +31,28 @@ import {
   decodeLine,
   decodePattern,
   encodeField,
-  encodeFilter,
   encodeLine,
   encodePattern,
 } from '../state/url';
-import { LabelFilter, LineFilter, MessageFieldFilter, PatternFilter, QuerySpec } from '../state/types';
-import { Display, ExplorationApi, Tab as TabName } from './api';
+import {
+  emptySpec,
+  LabelFilter,
+  LabelOp,
+  LineFilter,
+  MessageFieldFilter,
+  PatternFilter,
+  QuerySpec,
+} from '../state/types';
+import { Display, displayLabel, ExplorationApi, isExplorationApi, Tab as TabName } from './api';
 import { BreakdownScene, MESSAGE_FIELD_PREFIX } from './BreakdownScene';
 import { DetailsHeader } from './FiltersBar';
 import { LogsTabScene } from './LogsTabScene';
 import { PatternsTabScene } from './PatternsTabScene';
 import { ServiceSelectionScene } from './ServiceSelectionScene';
 import { ErrorBox, Loading, ScanGuard } from './ui';
+
+type AdHocFilter = AdHocFiltersVariable['state']['filters'][number];
+type Page = 'selection' | 'details';
 
 export interface LogsExplorationState extends SceneObjectState {
   /** selected kotak-starrocks-datasource instance (one StarRocks database) */
@@ -52,8 +65,14 @@ export interface LogsExplorationState extends SceneObjectState {
   viewsError?: string;
   ctx?: BuildContext;
   ctxError?: string;
+  /** the value grid ("selection") or the logs of the current filters ("details") */
+  page: Page;
+  /** label of the value grid (default: serviceLabel, shown as "service") */
   primaryLabel?: string;
-  filters: LabelFilter[];
+  /** extra label tabs added with "Add label" */
+  labelTabs: string[];
+  /** "Filter by label values" combobox; source of truth for label filters (URL: var-filters) */
+  labelFilters: AdHocFiltersVariable;
   levels: string[];
   lineFilters: LineFilter[];
   patternFilters: PatternFilter[];
@@ -71,10 +90,13 @@ export interface LogsExplorationState extends SceneObjectState {
   controls: SceneObject[];
 }
 
+// "filter" is the 0.1.0/0.2.0 URL format for label filters; it is read and converted, never written.
 const URL_KEYS = [
   'ds',
   'view',
+  'page',
   'label',
+  'tabs',
   'filter',
   'level',
   'line',
@@ -89,10 +111,69 @@ const URL_KEYS = [
   'search',
 ];
 const TABS: TabName[] = ['logs', 'labels', 'fields', 'patterns'];
+// =| and !=| (one of / not one of) are expanded to several = / != filters
+const LABEL_OPS: string[] = ['=', '!=', '=|', '!=|', '=~', '!~'];
+
+function toAdHoc(f: LabelFilter): AdHocFilter {
+  return { key: f.key, operator: f.op, value: f.value, keyLabel: f.key, valueLabels: [f.value] };
+}
+
+function findExploration(obj: SceneObject): LogsExploration | undefined {
+  let cur: SceneObject | undefined = obj;
+  while (cur) {
+    if (isExplorationApi(cur)) {
+      return cur as unknown as LogsExploration;
+    }
+    cur = cur.parent;
+  }
+  return undefined;
+}
+
+/** "Filter by label values" combobox; only operators that work on text columns (no < or >). */
+class LabelFiltersVariable extends AdHocFiltersVariable {
+  _getOperators() {
+    return super._getOperators().filter((o) => o.value !== undefined && LABEL_OPS.includes(o.value));
+  }
+}
+
+/** The same "Filter by label values" combobox as Logs Drilldown, fed with the view's columns and values. */
+function createLabelFiltersVariable(): AdHocFiltersVariable {
+  return new LabelFiltersVariable({
+    name: 'filters',
+    label: 'Labels',
+    layout: 'combobox',
+    applyMode: 'manual',
+    datasource: RUNTIME_DS,
+    filters: [],
+    allowCustomValue: true,
+    supportsMultiValueOperators: true,
+    getTagKeysProvider: async (variable) => {
+      const ctx = findExploration(variable)?.getContext();
+      const keys = ctx ? [...ctx.labels, ...ctx.fields] : [];
+      return { replace: true, values: keys.map((k) => ({ text: k, value: k })) };
+    },
+    getTagValuesProvider: async (variable, filter) => {
+      const ex = findExploration(variable);
+      const ctx = ex?.getContext();
+      if (!ex || !ctx || !filter.key) {
+        return { replace: true, values: [] };
+      }
+      // values of this label under the other filters (not those on the same label)
+      const spec = { ...ex.getSpec(), filters: ex.getLabelFilters().filter((f) => f.key !== filter.key) };
+      const frames = await runSqlOnce(
+        labelValuesQuery(spec, ctx, filter.key, 200),
+        sceneGraph.getTimeRange(ex).state.value,
+        'values',
+        spec.datasource
+      );
+      return { replace: true, values: stringColumn(frames[0], 'v').map((v) => ({ text: v, value: v })) };
+    },
+  });
+}
 
 /**
- * Root of the drilldown. Owns all state that is in the URL (view, filters, tab, display options) and builds
- * the body: the service grid when no filter is set, otherwise the Logs / Labels / Fields / Patterns tabs.
+ * Root of the drilldown. Owns the URL state (data source, view, page, filters, tab, display options) and
+ * builds the body: the value grid ("selection") or the Logs / Labels / Fields / Patterns tabs ("details").
  */
 export class LogsExploration extends SceneObjectBase<LogsExplorationState> implements ExplorationApi {
   static Component = LogsExplorationRenderer;
@@ -103,7 +184,9 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
 
   constructor(state: Partial<LogsExplorationState> = {}) {
     super({
-      filters: [],
+      page: 'selection',
+      labelTabs: [],
+      labelFilters: createLabelFiltersVariable(),
       levels: [],
       lineFilters: [],
       patternFilters: [],
@@ -113,14 +196,19 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       display: 'logs',
       wrap: false,
       search: '',
-      controls: [new SceneTimePicker({}), new SceneRefreshPicker({})],
+      controls: [new SceneTimePicker({ quickRanges: QUICK_RANGES }), new SceneRefreshPicker({})],
       ...state,
     });
     this.addActivationHandler(() => {
       const tr = sceneGraph.getTimeRange(this);
-      const sub = tr.subscribeToState(() => {
+      const timeSub = tr.subscribeToState(() => {
         if (this.computeGuardSignature() !== this.guardSignature) {
           this.rebuild();
+        }
+      });
+      const filterSub = this.state.labelFilters.subscribeToState((s, prev) => {
+        if (s.filters !== prev.filters) {
+          this.onLabelFiltersChanged(prev.filters, s.filters);
         }
       });
       if (this.state.views === undefined) {
@@ -128,11 +216,19 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       } else {
         this.rebuild();
       }
-      return () => sub.unsubscribe();
+      return () => {
+        timeSub.unsubscribe();
+        filterSub.unsubscribe();
+      };
     });
   }
 
   // ---- URL state ----
+
+  /** Navigation (page, tab, view, data source) adds a browser history step, so Back returns to it. */
+  private navigate(change: () => void) {
+    this._urlSync.performBrowserHistoryAction(change);
+  }
 
   getUrlState(): SceneObjectUrlValues {
     const s = this.state;
@@ -140,8 +236,10 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     return {
       ds: s.datasource ?? null,
       view: s.view ?? null,
+      page: s.page === 'details' ? 'details' : null,
       label: s.primaryLabel ?? null,
-      filter: list(s.filters.map(encodeFilter)),
+      tabs: list(s.labelTabs),
+      filter: null,
       level: list(s.levels),
       line: list(s.lineFilters.map(encodeLine)),
       pattern: list(s.patternFilters.map(encodePattern)),
@@ -159,20 +257,29 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
   updateFromUrl(values: SceneObjectUrlValues) {
     const one = (k: string) => {
       const v = asArray(values[k] as string | string[] | null | undefined);
-      return v.length > 0 ? v[0] : undefined;
+      return v.length > 0 && v[0] !== '' ? v[0] : undefined;
     };
     const next: Partial<LogsExplorationState> = {};
-    if ('ds' in values) {
+    // A URL without ds/view never clears them: they are picked automatically (and written back to the URL),
+    // and a URL update can race with that pick.
+    if (one('ds')) {
       next.datasource = one('ds');
     }
-    if ('view' in values) {
+    if (one('view')) {
       next.view = one('view');
+    }
+    if ('page' in values) {
+      next.page = one('page') === 'details' ? 'details' : 'selection';
     }
     if ('label' in values) {
       next.primaryLabel = one('label');
     }
-    if ('filter' in values) {
-      next.filters = decodeAll(values.filter as string[], decodeFilter);
+    if ('tabs' in values) {
+      next.labelTabs = asArray(values.tabs as string[]).filter((t) => t !== '');
+    }
+    const legacyFilters = decodeAll(values.filter as string[], decodeFilter);
+    if (legacyFilters.length > 0) {
+      next.page = 'details';
     }
     if ('level' in values) {
       next.levels = asArray(values.level as string[]).filter((l) => (LEVELS as readonly string[]).includes(l));
@@ -213,6 +320,9 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     const dsChanged = next.datasource !== undefined && next.datasource !== this.state.datasource;
     const viewChanged = next.view !== undefined && next.view !== this.state.view;
     this.setState(next);
+    if (legacyFilters.length > 0) {
+      this.state.labelFilters.updateFilters(legacyFilters.map(toAdHoc));
+    }
     if (this.isActive) {
       if (dsChanged && next.datasource) {
         this.loadViews(next.datasource);
@@ -228,7 +338,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
 
   /**
    * Lists the StarRocks data sources and picks one: the one in the URL if any (no fallback: the user chose
-   * it), otherwise the configured default, falling back to the next data source where the user can see
+   * it), otherwise the last one used, the configured default, then any data source where the user can see
    * views (people with access to one database only land on it).
    */
   private async loadDatasources() {
@@ -245,8 +355,9 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       await this.loadViews(chosen);
       return;
     }
-    const def = getAppConfig().datasource.uid;
-    const order = [...list.filter((d) => d.uid === def), ...list.filter((d) => d.uid !== def)].map((d) => d.uid);
+    const preferred = [getLastSelection().ds, getAppConfig().datasource.uid];
+    const uids = list.map((d) => d.uid);
+    const order = Array.from(new Set([...preferred.filter((u): u is string => !!u && uids.includes(u)), ...uids]));
     const problems: Record<string, string> = {};
     for (const uid of order) {
       try {
@@ -283,10 +394,18 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     }
   }
 
+  /** Picks the view: the one in the URL, else the last one used in this data source, else the first. */
   private async applyViews(views: string[]) {
-    const view = this.state.view && views.includes(this.state.view) ? this.state.view : views[0];
+    const last = getLastSelection();
+    let view = views[0];
+    if (this.state.view && views.includes(this.state.view)) {
+      view = this.state.view;
+    } else if (last.ds === this.state.datasource && last.view && views.includes(last.view)) {
+      view = last.view;
+    }
     this.setState({ views, view, viewsError: undefined });
     if (view) {
+      setLastSelection(this.state.datasource, view);
       await this.loadContext(view);
     } else {
       this.rebuild();
@@ -312,18 +431,82 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     }
   }
 
+  // ---- label filters ----
+
+  getLabelFiltersVariable() {
+    return this.state.labelFilters;
+  }
+
+  getLabelFilters(): LabelFilter[] {
+    return this.state.labelFilters.state.filters
+      .filter((f) => !f.hidden && f.key && LABEL_OPS.includes(f.operator))
+      .flatMap((f): LabelFilter[] => {
+        if (f.operator === '=|' || f.operator === '!=|') {
+          const op: LabelOp = f.operator === '=|' ? '=' : '!=';
+          return (f.values ?? [f.value]).map((value) => ({ key: f.key, op, value }));
+        }
+        return [{ key: f.key, op: f.operator as LabelOp, value: f.value }];
+      });
+  }
+
+  private setLabelFilters(filters: LabelFilter[]) {
+    this.state.labelFilters.updateFilters(filters.map(toAdHoc));
+  }
+
+  private onLabelFiltersChanged(prev: AdHocFilter[], next: AdHocFilter[]) {
+    if (this.state.page === 'selection') {
+      // Include / Remove on the grid's own label: the grid stays the same, its rows update themselves
+      const primary = this.primaryLabel();
+      const others = (fs: AdHocFilter[]) =>
+        JSON.stringify(fs.filter((f) => f.key !== primary).map((f) => [f.key, f.operator, f.value]));
+      if (others(prev) === others(next)) {
+        return;
+      }
+    }
+    this.setState({ breakdown: undefined });
+    this.rebuild();
+  }
+
+  addFilter(f: LabelFilter) {
+    const cur = this.getLabelFilters();
+    const exists = cur.some((x) => x.key === f.key && x.value === f.value && x.op === f.op);
+    const others = cur.filter((x) => !(x.key === f.key && x.value === f.value));
+    this.setLabelFilters(exists ? others : [...others, f]);
+  }
+
+  removeLabelFilter(key: string, value: string) {
+    this.setLabelFilters(this.getLabelFilters().filter((f) => !(f.key === key && f.value === value)));
+  }
+
+  hasFilter(key: string, value: string, op: LabelFilter['op'] = '=') {
+    return this.getLabelFilters().some((f) => f.key === key && f.value === value && f.op === op);
+  }
+
   // ---- ExplorationApi ----
+
+  primaryLabel(): string {
+    return this.state.primaryLabel ?? getAppConfig().serviceLabel;
+  }
 
   getSpec(): QuerySpec {
     const s = this.state;
     return {
       datasource: s.datasource ?? '',
       view: s.view ?? '',
-      filters: s.filters,
+      filters: this.getLabelFilters(),
       levels: s.levels,
       lineFilters: s.lineFilters,
       patternFilters: s.patternFilters,
       fieldFilters: s.fieldFilters,
+    };
+  }
+
+  /** The value grid uses only label filters, and not those on its own label (it shows every value). */
+  private selectionSpec(): QuerySpec {
+    const primary = this.primaryLabel();
+    return {
+      ...emptySpec(this.state.view ?? '', this.state.datasource ?? ''),
+      filters: this.getLabelFilters().filter((f) => f.key !== primary),
     };
   }
 
@@ -342,7 +525,11 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
   }
 
   isDetails() {
-    return this.state.filters.length > 0;
+    return this.state.page === 'details';
+  }
+
+  private clearedFilters() {
+    return { levels: [], lineFilters: [], patternFilters: [], fieldFilters: [] };
   }
 
   /** Switch database: views, columns and filters belong to the data source, so they are reset. */
@@ -350,15 +537,20 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     if (uid === this.state.datasource) {
       return;
     }
-    this.setState({
-      datasource: uid,
-      view: undefined,
-      ...this.clearedFilters(),
-      breakdown: undefined,
-      tab: 'logs',
-      search: '',
-      primaryLabel: undefined,
-    });
+    this.navigate(() =>
+      this.setState({
+        datasource: uid,
+        view: undefined,
+        page: 'selection',
+        ...this.clearedFilters(),
+        breakdown: undefined,
+        tab: 'logs',
+        search: '',
+        primaryLabel: undefined,
+        labelTabs: [],
+      })
+    );
+    this.setLabelFilters([]);
     this.loadViews(uid);
   }
 
@@ -366,41 +558,30 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     if (view === this.state.view) {
       return;
     }
-    this.setState({ view, ...this.clearedFilters(), breakdown: undefined, tab: 'logs', search: '' });
+    this.navigate(() =>
+      this.setState({
+        view,
+        page: 'selection',
+        ...this.clearedFilters(),
+        breakdown: undefined,
+        tab: 'logs',
+        search: '',
+      })
+    );
+    this.setLabelFilters([]);
+    setLastSelection(this.state.datasource, view);
     this.loadContext(view);
-  }
-
-  private clearedFilters() {
-    return { filters: [], levels: [], lineFilters: [], patternFilters: [], fieldFilters: [] };
-  }
-
-  addFilter(f: LabelFilter) {
-    const others = this.state.filters.filter((x) => !(x.key === f.key && x.value === f.value));
-    const exists = this.state.filters.some((x) => x.key === f.key && x.value === f.value && x.op === f.op);
-    this.setState({ filters: exists ? others : [...others, f] });
-    this.afterFilterChange();
-  }
-
-  removeFilter(i: number) {
-    const filters = this.state.filters.filter((_, n) => n !== i);
-    this.setState(filters.length === 0 ? { ...this.clearedFilters(), breakdown: undefined } : { filters });
-    this.afterFilterChange();
-  }
-
-  hasFilter(key: string, value: string, op: LabelFilter['op'] = '=') {
-    return this.state.filters.some((f) => f.key === key && f.value === value && f.op === op);
   }
 
   setLevels(levels: string[]) {
     const cur = this.state.levels;
     const same = cur.length === levels.length && levels.every((l) => cur.includes(l));
-    this.setState({ levels: same || levels.length >= LEVELS.length ? [] : levels });
-    this.afterFilterChange();
+    this.setLevelsExact(same ? [] : levels);
   }
 
-  toggleLevel(level: string) {
-    const cur = this.state.levels;
-    this.setState({ levels: cur.includes(level) ? cur.filter((l) => l !== level) : [...cur, level] });
+  /** From the "Log levels" select: exactly these levels (none or all = no filter). */
+  setLevelsExact(levels: string[]) {
+    this.setState({ levels: levels.length >= LEVELS.length ? [] : levels });
     this.afterFilterChange();
   }
 
@@ -455,7 +636,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
   }
 
   setTab(tab: TabName) {
-    this.setState({ tab, breakdown: undefined });
+    this.navigate(() => this.setState({ tab, breakdown: undefined }));
     this.rebuild();
   }
 
@@ -464,24 +645,44 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     this.rebuild();
   }
 
+  /** "Show logs" on a value: that value only (for its label), other filters kept. */
   selectValue(label: string, value: string) {
-    this.setState({
-      ...this.clearedFilters(),
-      filters: [{ key: label, op: '=', value }],
-      tab: 'logs',
-      breakdown: undefined,
-    });
+    const filters = this.getLabelFilters().filter((f) => !(f.key === label && f.op === '='));
+    this.navigate(() => this.setState({ page: 'details', tab: 'logs', breakdown: undefined }));
+    this.setLabelFilters([...filters, { key: label, op: '=', value }]);
     this.rebuild();
   }
 
-  clearAll() {
-    this.setState({ ...this.clearedFilters(), breakdown: undefined, tab: 'logs' });
+  /** "Show logs" above the grid: the logs of the current filters. */
+  showLogs() {
+    this.navigate(() => this.setState({ page: 'details', tab: 'logs', breakdown: undefined }));
+    this.rebuild();
+  }
+
+  backToSelection() {
+    this.navigate(() => this.setState({ page: 'selection', breakdown: undefined }));
     this.rebuild();
   }
 
   setPrimaryLabel(label: string) {
-    this.setState({ primaryLabel: label === getAppConfig().serviceLabel ? undefined : label, search: '' });
+    const primaryLabel = label === getAppConfig().serviceLabel ? undefined : label;
+    this.navigate(() => this.setState({ primaryLabel, search: '' }));
     this.rebuild();
+  }
+
+  addLabelTab(label: string) {
+    if (label !== getAppConfig().serviceLabel && !this.state.labelTabs.includes(label)) {
+      this.setState({ labelTabs: [...this.state.labelTabs, label] });
+    }
+    this.setPrimaryLabel(label);
+  }
+
+  removeLabelTab(label: string) {
+    const wasActive = this.primaryLabel() === label;
+    this.setState({ labelTabs: this.state.labelTabs.filter((t) => t !== label) });
+    if (wasActive) {
+      this.setPrimaryLabel(getAppConfig().serviceLabel);
+    }
   }
 
   setSearch(search: string) {
@@ -571,10 +772,16 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
         `StarRocks returned no views matching ${viewPrefixFor(config, s.datasource)}* in ${dsName} for your account. Ask for access to your team's log view${(s.datasources?.length ?? 0) > 1 ? ', or pick another data source' : ''}.`
       );
     }
+    if (!s.view || !s.views.includes(s.view)) {
+      // never stay without a view while the user has some: pick one
+      const views = s.views;
+      queueMicrotask(() => this.applyViews(views));
+      return new SceneReactObject({ reactNode: <Loading text="Opening view…" /> });
+    }
     if (s.ctxError) {
       return this.message('error', `Could not open ${s.view}`, s.ctxError);
     }
-    if (!s.view || !s.ctx) {
+    if (!s.ctx) {
       return new SceneReactObject({ reactNode: <Loading text="Opening view…" /> });
     }
     const spec = this.getSpec();
@@ -585,8 +792,8 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
 
     if (!this.isDetails()) {
       return new ServiceSelectionScene({
-        spec,
-        label: s.primaryLabel ?? config.serviceLabel,
+        spec: this.selectionSpec(),
+        label: this.primaryLabel(),
         search: s.search,
         withLevel: !levelSkipped,
         levelNotice: levelSkipped,
@@ -624,14 +831,11 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
 function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>) {
   const styles = useStyles2(getStyles);
   const state = model.useState();
-  const { views, view, body, controls, ctx, tab, primaryLabel, datasources, datasource, datasourceProblems } = state;
-  const config = getAppConfig();
+  const { views, view, body, controls, ctx, tab, datasources, datasource, datasourceProblems, labelFilters, page } =
+    state;
+  const { filters } = labelFilters.useState();
   const errors = getAppConfigErrors();
-  const details = model.isDetails();
-  const label = primaryLabel ?? config.serviceLabel;
-  const labelTabs = Array.from(new Set([config.serviceLabel, 'k8s_namespace_name', label])).filter(
-    (l) => !ctx || ctx.labels.includes(l)
-  );
+  const details = page === 'details';
 
   return (
     <div className={styles.wrapper}>
@@ -644,48 +848,67 @@ function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>
           </ul>
         </Alert>
       )}
-      <div className={styles.topRow}>
-        <span className={styles.label}>Data source</span>
-        <Select
-          width={32}
-          aria-label="Data source"
-          data-testid="datasource-picker"
-          isLoading={datasources === undefined}
-          options={(datasources ?? []).map((d) => ({
-            label: d.name,
-            value: d.uid,
-            description: datasourceProblems?.[d.uid],
-          }))}
-          value={datasource ?? null}
-          onChange={(o) => o.value && model.setDatasource(o.value)}
-          placeholder="Select a data source"
-        />
-        <span className={styles.label}>View</span>
-        <Select
-          width={48}
-          aria-label="View"
-          data-testid="view-picker"
-          isLoading={views === undefined}
-          options={(views ?? []).map((v) => ({ label: v, value: v }))}
-          value={view ?? null}
-          onChange={(o) => o.value && model.setView(o.value)}
-          placeholder="Select a view"
-        />
-        {details && (
-          <Button
-            size="md"
-            variant="secondary"
-            icon="arrow-left"
-            onClick={() => model.clearAll()}
-            data-testid="back-to-services"
-          >
-            All values of {label}
-          </Button>
-        )}
-        <div className={styles.spacer} />
-        {controls.map((c) => (
-          <c.Component key={c.state.key} model={c} />
-        ))}
+      <div className={styles.header}>
+        <div className={styles.left}>
+          <div className={styles.caption}>Labels</div>
+          <div className={styles.filterRow}>
+            <div className={styles.filters} data-testid="label-filters">
+              <labelFilters.Component model={labelFilters} />
+            </div>
+            {details ? (
+              <Button
+                variant="secondary"
+                icon="arrow-left"
+                onClick={() => model.backToSelection()}
+                data-testid="back-to-services"
+              >
+                Back to {displayLabel(model.primaryLabel())} values
+              </Button>
+            ) : (
+              <Button
+                variant={filters.length > 0 ? 'primary' : 'secondary'}
+                fill="outline"
+                onClick={() => model.showLogs()}
+                data-testid="show-logs"
+              >
+                Show logs
+              </Button>
+            )}
+          </div>
+        </div>
+        <div className={styles.right}>
+          <InlineField label="Data source">
+            <Select
+              width={22}
+              aria-label="Data source"
+              data-testid="datasource-picker"
+              isLoading={datasources === undefined}
+              options={(datasources ?? []).map((d) => ({
+                label: d.name,
+                value: d.uid,
+                description: datasourceProblems?.[d.uid],
+              }))}
+              value={datasource ?? null}
+              onChange={(o) => o.value && model.setDatasource(o.value)}
+              placeholder="Select a data source"
+            />
+          </InlineField>
+          <InlineField label="View">
+            <Select
+              width={34}
+              aria-label="View"
+              data-testid="view-picker"
+              isLoading={views === undefined}
+              options={(views ?? []).map((v) => ({ label: v, value: v }))}
+              value={view ?? null}
+              onChange={(o) => o.value && model.setView(o.value)}
+              placeholder="Select a view"
+            />
+          </InlineField>
+          {controls.map((c) => (
+            <c.Component key={c.state.key} model={c} />
+          ))}
+        </div>
       </div>
 
       {details ? (
@@ -707,39 +930,82 @@ function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>
                         ? ctx?.tenant.patterns.length
                         : undefined
                 }
-                data-testid={`tab-${t}`}
               />
             ))}
           </TabsBar>
         </>
       ) : (
-        view &&
-        ctx && (
-          <TabsBar>
-            {labelTabs.map((l) => (
-              <Tab
-                key={l}
-                label={l}
-                active={label === l}
-                onChangeTab={() => model.setPrimaryLabel(l)}
-                data-testid={`label-tab-${l}`}
-              />
-            ))}
-            <div className={styles.addLabel}>
-              <Select
-                width={28}
-                aria-label="Group by another label"
-                placeholder="+ Add label"
-                options={ctx.labels.filter((l) => !labelTabs.includes(l)).map((l) => ({ label: l, value: l }))}
-                value={null}
-                onChange={(o) => o.value && model.setPrimaryLabel(o.value)}
-              />
-            </div>
-          </TabsBar>
-        )
+        view && ctx && <LabelTabs model={model} />
       )}
       <div className={styles.body}>{body && <body.Component model={body} />}</div>
     </div>
+  );
+}
+
+/** "service" tab, tabs added with "Add label" (closable), like Logs Drilldown. */
+function LabelTabs({ model }: { model: LogsExploration }) {
+  const styles = useStyles2(getStyles);
+  const { ctx, labelTabs } = model.useState();
+  const [adding, setAdding] = useState(false);
+  if (!ctx) {
+    return null;
+  }
+  const service = getAppConfig().serviceLabel;
+  const active = model.primaryLabel();
+  const tabs = Array.from(new Set([service, ...labelTabs, active])).filter((l) => ctx.labels.includes(l));
+  const remaining = ctx.labels.filter((l) => !tabs.includes(l));
+  return (
+    <TabsBar>
+      {tabs.map((l) => (
+        <Tab
+          key={l}
+          label={displayLabel(l)}
+          active={active === l}
+          onChangeTab={() => model.setPrimaryLabel(l)}
+          suffix={
+            l === service
+              ? undefined
+              : ({ className }: { className?: string }) => (
+                  <IconButton
+                    className={className}
+                    name="times"
+                    size="sm"
+                    aria-label={`Remove ${l} tab`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      model.removeLabelTab(l);
+                    }}
+                  />
+                )
+          }
+        />
+      ))}
+      <div className={styles.addLabel}>
+        {adding ? (
+          <Select
+            width={30}
+            autoFocus
+            isOpen
+            openMenuOnFocus
+            aria-label="Search labels"
+            placeholder="Search labels"
+            options={remaining.map((l) => ({ label: l, value: l }))}
+            onChange={(o) => {
+              setAdding(false);
+              if (o.value) {
+                model.addLabelTab(o.value);
+              }
+            }}
+            onBlur={() => setAdding(false)}
+            onCloseMenu={() => setAdding(false)}
+          />
+        ) : (
+          <Button fill="text" icon="plus-circle" onClick={() => setAdding(true)} data-testid="add-label">
+            Add label
+          </Button>
+        )}
+      </div>
+    </TabsBar>
   );
 }
 
@@ -753,9 +1019,34 @@ const getStyles = (theme: GrafanaTheme2) => ({
     minWidth: 0,
     width: '100%',
   }),
-  topRow: css({ display: 'flex', alignItems: 'center', gap: theme.spacing(1), flexWrap: 'wrap' }),
-  label: css({ color: theme.colors.text.secondary }),
-  spacer: css({ flex: 1 }),
+  header: css({
+    display: 'flex',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    gap: theme.spacing(2),
+    flexWrap: 'wrap',
+  }),
+  // the pickers sit to the right of the label filters when there is room (about 1350 px of content), else
+  // they wrap under them, right-aligned; the filter box never gets narrower than 280 px
+  left: css({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: theme.spacing(0.5),
+    flex: '1 1 440px',
+    minWidth: 'min-content',
+  }),
+  caption: css({ fontSize: theme.typography.bodySmall.fontSize, color: theme.colors.text.secondary }),
+  filterRow: css({ display: 'flex', alignItems: 'center', gap: theme.spacing(1) }),
+  filters: css({ flex: 1, minWidth: 280, maxWidth: 900 }),
+  // stays right-aligned when a narrow window wraps it under the label filters
+  right: css({
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: theme.spacing(1),
+    flexWrap: 'wrap',
+    marginLeft: 'auto',
+  }),
   addLabel: css({ marginLeft: theme.spacing(1), alignSelf: 'center' }),
   body: css({ paddingTop: theme.spacing(1), minWidth: 0 }),
 });

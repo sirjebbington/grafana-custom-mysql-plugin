@@ -1,57 +1,37 @@
 import { css } from '@emotion/css';
 import { useState } from 'react';
 
-import { GrafanaTheme2, SelectableValue } from '@grafana/data';
-import { sceneGraph } from '@grafana/scenes';
-import { AsyncSelect, Button, Input, Select, ToolbarButton, useStyles2 } from '@grafana/ui';
+import { GrafanaTheme2 } from '@grafana/data';
+import { Button, Icon, Input, MultiSelect, ToolbarButton, useStyles2 } from '@grafana/ui';
 
 import { LEVELS } from '../constants';
-import { runSqlOnce, stringColumn } from '../datasource/api';
-import { labelValuesQuery } from '../sql/builder';
-import { LabelOp } from '../state/types';
 import type { LogsExploration } from './LogsExploration';
-import { Chip, LevelDot } from './ui';
+import { Chip } from './ui';
 
-const OPS: Array<SelectableValue<LabelOp>> = [
-  { label: '=', value: '=' },
-  { label: '!=', value: '!=' },
-  { label: '=~', value: '=~', description: 'matches regex' },
-  { label: '!~', value: '!~', description: 'does not match regex' },
-];
-
-/** Filters above the tabs: column filters, levels, line search, and pattern / message-field filters. */
+/**
+ * Filters under the label filters on the logs page, like Logs Drilldown: "Log levels", line search, and
+ * chips for line / pattern / message-field filters.
+ */
 export function DetailsHeader({ model }: { model: LogsExploration }) {
   const styles = useStyles2(getStyles);
-  const { filters, levels, lineFilters, patternFilters, fieldFilters } = model.useState();
+  const { levels, lineFilters, patternFilters, fieldFilters } = model.useState();
   return (
     <div className={styles.wrapper}>
       <div className={styles.row}>
-        <span className={styles.label}>Labels</span>
-        {filters.map((f, i) => (
-          <Chip key={`${f.key}${f.op}${f.value}`} onRemove={() => model.removeFilter(i)} testId="filter-chip">
-            {f.key} {f.op} {f.value}
-          </Chip>
-        ))}
-        <AddFilter model={model} />
+        <div className={styles.levels} data-testid="log-levels">
+          <MultiSelect<string>
+            aria-label="Log levels"
+            placeholder="All levels"
+            prefix={<Icon name="filter" />}
+            options={LEVELS.map((l) => ({ label: l, value: l }))}
+            value={levels}
+            onChange={(opts) => model.setLevelsExact(opts.map((o) => o.value!).filter(Boolean))}
+            isClearable
+            width={36}
+          />
+        </div>
+        <LineFilterInput model={model} />
       </div>
-      <div className={styles.row}>
-        <span className={styles.label}>Levels</span>
-        {LEVELS.map((l) => (
-          <Button
-            key={l}
-            size="sm"
-            variant={levels.includes(l) ? 'primary' : 'secondary'}
-            fill={levels.includes(l) ? 'solid' : 'outline'}
-            onClick={() => model.toggleLevel(l)}
-            data-testid={`level-${l}`}
-          >
-            <span className={styles.level}>
-              <LevelDot level={l} /> {l}
-            </span>
-          </Button>
-        ))}
-      </div>
-      <LineFilterInput model={model} />
       {(lineFilters.length > 0 || patternFilters.length > 0 || fieldFilters.length > 0) && (
         <div className={styles.row}>
           {lineFilters.map((f, i) => (
@@ -76,72 +56,6 @@ export function DetailsHeader({ model }: { model: LogsExploration }) {
   );
 }
 
-function AddFilter({ model }: { model: LogsExploration }) {
-  const styles = useStyles2(getStyles);
-  const { ctx } = model.useState();
-  const [key, setKey] = useState<string | undefined>();
-  const [op, setOp] = useState<LabelOp>('=');
-  const [value, setValue] = useState<SelectableValue<string> | null>(null);
-  if (!ctx) {
-    return null;
-  }
-  const keys = [...ctx.labels, ...ctx.fields].map((k) => ({ label: k, value: k }));
-  const loadValues = async (input: string) => {
-    if (!key) {
-      return [];
-    }
-    const frames = await runSqlOnce(
-      labelValuesQuery(model.getSpec(), ctx, key, 200),
-      sceneGraph.getTimeRange(model).state.value,
-      'values',
-      model.getSpec().datasource
-    );
-    const values = stringColumn(frames[0], 'v');
-    const counts = stringColumn(frames[0], 'c');
-    return values
-      .map((v, i) => ({ label: v, value: v, description: `${counts[i]} lines` }))
-      .filter((o) => input === '' || o.label.toLowerCase().includes(input.toLowerCase()));
-  };
-  const add = () => {
-    if (key && value?.value !== undefined) {
-      model.addFilter({ key, op, value: value.value });
-      setValue(null);
-    }
-  };
-  return (
-    <span className={styles.add} data-testid="add-filter">
-      <Select
-        width={26}
-        placeholder="Add filter: label"
-        options={keys}
-        value={key ?? null}
-        onChange={(o) => {
-          setKey(o.value);
-          setValue(null);
-        }}
-        aria-label="Filter label"
-      />
-      <Select width={8} options={OPS} value={op} onChange={(o) => setOp(o.value!)} aria-label="Filter operator" />
-      <AsyncSelect
-        key={key ?? 'none'}
-        width={32}
-        placeholder="value"
-        disabled={!key}
-        defaultOptions={!!key}
-        cacheOptions
-        loadOptions={loadValues}
-        allowCustomValue
-        value={value}
-        onChange={(o) => setValue(o)}
-        aria-label="Filter value"
-      />
-      <Button size="sm" icon="plus" onClick={add} disabled={!key || !value} aria-label="Add filter">
-        Add
-      </Button>
-    </span>
-  );
-}
-
 function LineFilterInput({ model }: { model: LogsExploration }) {
   const styles = useStyles2(getStyles);
   const [text, setText] = useState('');
@@ -154,10 +68,9 @@ function LineFilterInput({ model }: { model: LogsExploration }) {
     }
   };
   return (
-    <div className={styles.row}>
-      <span className={styles.label}>Line</span>
+    <div className={styles.line}>
       <Input
-        width={50}
+        width={60}
         placeholder="Search in log lines"
         value={text}
         onChange={(e) => setText(e.currentTarget.value)}
@@ -197,8 +110,7 @@ function LineFilterInput({ model }: { model: LogsExploration }) {
 const getStyles = (theme: GrafanaTheme2) => ({
   wrapper: css({ display: 'flex', flexDirection: 'column', gap: theme.spacing(1) }),
   row: css({ display: 'flex', alignItems: 'center', gap: theme.spacing(1), flexWrap: 'wrap' }),
-  label: css({ color: theme.colors.text.secondary, width: 52 }),
-  add: css({ display: 'inline-flex', alignItems: 'center', gap: theme.spacing(0.5) }),
-  level: css({ display: 'inline-flex', alignItems: 'center', gap: theme.spacing(0.5) }),
+  levels: css({ flex: '0 0 auto' }),
+  line: css({ display: 'flex', alignItems: 'center', gap: theme.spacing(1), flex: '1 1 480px', minWidth: 0 }),
   toggles: css({ display: 'inline-flex', gap: 2 }),
 });

@@ -13,7 +13,7 @@ import {
   useSceneApp,
 } from '@grafana/scenes';
 
-import { EXPLORE_ROUTE, PLUGIN_BASE_URL } from '../constants';
+import { APP_TITLE, EXPLORE_ROUTE, PLUGIN_BASE_URL } from '../constants';
 import { AppJsonData, getAppConfig, setAppConfig } from '../config/config';
 import { ensureRuntimeDataSource } from '../datasource/StarRocksLogsDataSource';
 import { LogsExploration } from './LogsExploration';
@@ -39,15 +39,15 @@ function getSceneApp(): SceneApp {
     urlSyncOptions: { updateUrlOnInit: true, createBrowserHistorySteps: true },
     pages: [
       new SceneAppPage({
-        title: 'StarRocks Logs',
-        subTitle:
-          'Explore StarRocks log views without writing SQL. Queries run as you, so you only see views you have access to.',
+        // title in the breadcrumb and browser tab only; the page itself starts with the filters, like Logs Drilldown
+        title: APP_TITLE,
+        renderTitle: () => null,
         url: EXPLORE_ROUTE,
         routePath: 'explore/*',
         getScene: getExploreScene,
       }),
       new SceneAppPage({
-        title: 'StarRocks Logs',
+        title: APP_TITLE,
         url: PLUGIN_BASE_URL,
         routePath: '*',
         getScene: () => new EmbeddedScene({ body: new SceneReactObject({ component: RedirectToExplore }) }),

@@ -1,4 +1,4 @@
-# kotak-starrocks-logs-app — StarRocks Logs Drilldown
+# kotak-starrocks-logs-app — Logs Drilldown (StarRocks)
 
 A Grafana app plugin that gives the StarRocks log views (`vw_eks_app_logs_<app_id>`) the Loki Logs
 Drilldown experience, without writing SQL. It does **not** change `kotak-starrocks-datasource`: every query
@@ -7,21 +7,26 @@ Ranger decide what each person sees, exactly as for dashboards.
 
 | Logs Drilldown feature | Here |
 |---|---|
-| Data source picker | **Data source picker** (one `kotak-starrocks-datasource` instance per StarRocks database) **+ view picker** (`SHOW TABLES LIKE 'vw_eks_app_logs_%'`, filtered by Ranger) |
-| Service grid (volume + newest lines per service), search, label tabs | Yes: one `GROUP BY` for all volumes, one `UNION ALL` for the visible page's lines |
-| Logs tab: volume by level, lines, newest/oldest, wrap, line limit | Yes (Grafana's Logs panel) |
+| Header: label filters left; data source, time range and refresh right | Yes: "Filter by label values" combobox (labels, operators, a dropdown of values) on the left; **Data source** (one `kotak-starrocks-datasource` instance per StarRocks database) **+ View** (`SHOW TABLES LIKE 'vw_eks_app_logs_%'`, filtered by Ranger) + time (quick ranges up to 24 hours) + refresh on the right |
+| Service grid: volume by level with totals + newest lines per service, "Search services" dropdown, page size and pages | Yes: one `GROUP BY` for all volumes, one `UNION ALL` for the visible page's lines |
+| ★ Favourites, **Include / Remove**, Show logs on each service | Yes (favourites per browser, listed first) |
+| "service" tab + **Add label** (closable tabs for other labels) | Yes |
+| Logs tab: volume by level, lines, newest/oldest, wrap | Yes (Grafana's Logs panel) |
+| **Infinite scroll**: the next lines load at the end of the list | Yes: pages of `lineLimit` lines with exact µs bounds, no gaps or repeats |
 | Logs / Table / JSON views | Yes |
 | Search in log lines: include / exclude, match case, regex | Yes |
-| Label and level filters; filter buttons in log details | Yes |
+| Label filters, "Log levels" select; filter buttons in log details | Yes |
 | Trace links → Explore with the trace | Yes: per-tenant regex + Tempo uid |
 | Show context | Yes: same pod, ±1 h (Grafana's context modal) |
 | Labels tab, Fields tab (incl. key=value / JSON fields in lines) | Yes, with Include / Exclude |
 | Patterns tab | Yes: **per-tenant configured patterns** (one scan), "(unmatched)" share, "Suggest patterns" from a sample |
-| Open in Explore, share link (state in the URL) | Yes (Explore shows the SQL result as a table) |
+| Open in Explore, share link (state in the URL), browser Back/Forward | Yes (Explore shows the SQL result as a table) |
 | Level | Per tenant: the `level` column, or extracted from the message (observability) |
 
-Not in this version: favourites, add-to-dashboard, alerts and an "Open in StarRocks drilldown" button
-inside Explore.
+Not in this version: add-to-dashboard, alerts and an "Open in StarRocks drilldown" button inside Explore.
+
+The app remembers, per browser, the last data source and view (opened by default next time) and the favourite
+values per view and label.
 
 ## How it works
 
@@ -39,10 +44,13 @@ flowchart LR
   literals so the datasource's macro engine cannot touch user text.
 - `src/datasource/StarRocksLogsDataSource.ts` is the runtime data source every panel queries; it also
   implements "show context".
-- `src/components/*` are the Scenes screens. All state is in the URL.
+- `src/components/*` are the Scenes screens. All state is in the URL (label filters as `var-filters`, like
+  Logs Drilldown; links from 0.1.0/0.2.0 with `filter=` still open).
 - Long text scans are guarded (`maxScanHours`): the user sees a notice and can shorten the range or run anyway.
 
-Screenshots from the end-to-end run (synthetic data): [service grid](docs/screenshots/02-service-grid.png),
+Screenshots from the end-to-end run (synthetic data): [header and service grid](docs/screenshots/00-layout.png),
+[Include](docs/screenshots/02c-include.png), [Add label](docs/screenshots/02d-add-label.png),
+[values dropdown](docs/screenshots/02e-values-dropdown.png), [quick ranges](docs/screenshots/00-quick-ranges.png),
 [log details with trace link](docs/screenshots/03-log-details-trace-link.png),
 [show context](docs/screenshots/05-show-context.png), [labels](docs/screenshots/06-labels-tab.png),
 [patterns](docs/screenshots/08-patterns-tab.png).
@@ -50,7 +58,8 @@ Screenshots from the end-to-end run (synthetic data): [service grid](docs/screen
 More in [docs/DESIGN.md](docs/DESIGN.md). Rollout in [docs/ROLLOUT.md](docs/ROLLOUT.md). Building it from the
 same repository and pipelines as the datasource: [docs/MONOREPO.md](docs/MONOREPO.md). Step-by-step rollout for
 the Claude session on the org PC: [docs/ORG_AGENT_PROMPT.md](docs/ORG_AGENT_PROMPT.md) (0.1.0), then
-[docs/ORG_AGENT_PROMPT_2_DATASOURCE_PICKER.md](docs/ORG_AGENT_PROMPT_2_DATASOURCE_PICKER.md) (0.2.0, data source picker).
+[docs/ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md](docs/ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md) (0.1.0 → 0.3.0 in one patch:
+data source picker and the Logs Drilldown look). Prompt 2 (0.2.0 only) is superseded by prompt 3.
 
 ## Configuration (app jsonData)
 
@@ -71,7 +80,7 @@ apps:
       viewPrefix: vw_eks_app_logs_
       defaultTimeRange: now-15m
       maxScanHours: 6                           # text scans over longer ranges ask first
-      lineLimit: 1000
+      lineLimit: 1000                           # lines per page; scrolling to the end loads the next page
       # labels / fields: optional column lists (defaults: k8s_* and friends)
       tenants:                                  # keyed by app_id = view name without the prefix,
                                                 # or <datasourceUid>/<app_id> for one database only
@@ -100,7 +109,7 @@ Node 22 and npm. No backend, no Go.
 
 ```bash
 npm ci
-npm run typecheck && npm run lint && npm run test:ci     # 51 unit tests
+npm run typecheck && npm run lint && npm run test:ci     # 58 unit tests
 npm run build                                             # → dist/
 ./scripts/package.sh && ./scripts/verify-package.sh       # → package/kotak-starrocks-logs-app-<version>.zip
 ```
@@ -116,8 +125,9 @@ table and tenant views, and native JWT users with per-view grants (standing in f
 npm run build
 ./scripts/e2e.sh up        # generates the app provisioning from dev/e2e/tenants/ (like deploy-config), seeds,
                            # Grafana http://localhost:23000 ("Sign in with IDAM", user e.g. kmbl3e2e)
-./scripts/e2e.sh smoke     # 20 API checks: every query kind on StarRocks, per-user views, two databases, escaping
-./scripts/e2e.sh test      # 20 browser tests (Playwright, in mcr.microsoft.com/playwright:v1.52.0-noble;
+./scripts/e2e.sh smoke     # 21 API checks: every query kind on StarRocks, per-user views, two databases, escaping,
+                           # infinite-scroll pages join without gaps
+./scripts/e2e.sh test      # 28 browser tests (Playwright, in mcr.microsoft.com/playwright:v1.52.0-noble;
                            # PLAYWRIGHT_LOCAL=1 runs them on the host if Chromium's libraries are installed)
 ./scripts/e2e.sh down
 ```
