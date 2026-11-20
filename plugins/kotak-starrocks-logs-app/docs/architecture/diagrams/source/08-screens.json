@@ -1,0 +1,207 @@
+{
+  "schema_version": 3,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Screens and states of the app",
+    "output": "08-screens/screens.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "mainPath": [
+    "loading",
+    "opening",
+    "grid",
+    "logs"
+  ],
+  "states": [
+    {
+      "id": "loading",
+      "type": "start",
+      "label": "Loading views",
+      "sublabel": "SHOW TABLES",
+      "step": "01",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 757,
+          "end_line": 780,
+          "label": "buildBody states"
+        }
+      ]
+    },
+    {
+      "id": "opening",
+      "type": "active",
+      "label": "Opening view",
+      "sublabel": "columns, tenant",
+      "step": "02"
+    },
+    {
+      "id": "grid",
+      "type": "success",
+      "label": "Service grid",
+      "sublabel": "selection page",
+      "step": "03",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/ServiceSelectionScene.tsx",
+          "line": 54,
+          "end_line": 84,
+          "label": "grid scene"
+        }
+      ]
+    },
+    {
+      "id": "logs",
+      "type": "success",
+      "label": "Logs page",
+      "sublabel": "4 tabs",
+      "step": "04",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 793,
+          "end_line": 828,
+          "label": "grid or tabs"
+        }
+      ]
+    },
+    {
+      "id": "nods",
+      "type": "failure",
+      "label": "No data source",
+      "sublabel": "none listed"
+    },
+    {
+      "id": "vierr",
+      "type": "failure",
+      "label": "Views error",
+      "sublabel": "e.g. refused login"
+    },
+    {
+      "id": "noviews",
+      "type": "neutral",
+      "label": "No log views",
+      "sublabel": "ask for access"
+    },
+    {
+      "id": "ctxerr",
+      "type": "failure",
+      "label": "Cannot open",
+      "sublabel": "columns failed"
+    },
+    {
+      "id": "guard",
+      "type": "waiting",
+      "label": "Scan guard",
+      "sublabel": "long text scan"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "t-open",
+      "from": "loading",
+      "to": "opening",
+      "label": "view picked"
+    },
+    {
+      "id": "t-ready",
+      "from": "opening",
+      "to": "grid",
+      "label": "columns ok"
+    },
+    {
+      "id": "t-show",
+      "from": "grid",
+      "to": "logs",
+      "label": "Show logs",
+      "variant": "emphasis"
+    },
+    {
+      "id": "t-back",
+      "from": "logs",
+      "to": "grid",
+      "label": "Back"
+    },
+    {
+      "id": "t-switch",
+      "from": "grid",
+      "to": "opening",
+      "label": "other view"
+    },
+    {
+      "id": "t-nods",
+      "from": "loading",
+      "to": "nods",
+      "label": "none",
+      "variant": "security"
+    },
+    {
+      "id": "t-vierr",
+      "from": "loading",
+      "to": "vierr",
+      "label": "error",
+      "variant": "security"
+    },
+    {
+      "id": "t-noviews",
+      "from": "loading",
+      "to": "noviews",
+      "label": "0 views",
+      "variant": "dashed"
+    },
+    {
+      "id": "t-ctxerr",
+      "from": "opening",
+      "to": "ctxerr",
+      "label": "error",
+      "variant": "security"
+    },
+    {
+      "id": "t-guard",
+      "from": "logs",
+      "to": "guard",
+      "label": "too long",
+      "variant": "dashed"
+    },
+    {
+      "id": "t-run",
+      "from": "guard",
+      "to": "logs",
+      "label": "run / shorten"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Service grid (page = selection)",
+      "items": [
+        "One row per value of the active label tab: volume by level, newest lines",
+        "Include / Remove adds a label filter without leaving the grid",
+        "Show logs on a row: that value only; Show logs at the top: all current filters"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Logs page (page = details)",
+      "items": [
+        "Logs, Labels, Fields, Patterns tabs; Log levels and line search above them",
+        "Back, or the browser's Back button, returns to the grid with the filters kept"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Scan guard",
+      "items": [
+        "Range longer than maxScanHours with a line, field, pattern or message-level filter",
+        "The user picks 'Use the last N hours' or 'Run anyway' (remembered for that range)"
+      ]
+    }
+  ]
+}

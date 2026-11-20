@@ -55,7 +55,7 @@ Screenshots from the end-to-end run (synthetic data): [header and service grid](
 [show context](docs/screenshots/05-show-context.png), [labels](docs/screenshots/06-labels-tab.png),
 [patterns](docs/screenshots/08-patterns-tab.png).
 
-More in [docs/DESIGN.md](docs/DESIGN.md). Rollout in [docs/ROLLOUT.md](docs/ROLLOUT.md). Building it from the
+**Architecture guide** (how every feature and query works, time handling, security, performance, decisions, Q&A, with diagrams readable on a phone): [docs/architecture/README.md](docs/architecture/README.md). More in [docs/DESIGN.md](docs/DESIGN.md). Rollout in [docs/ROLLOUT.md](docs/ROLLOUT.md). Building it from the
 same repository and pipelines as the datasource: [docs/MONOREPO.md](docs/MONOREPO.md). Step-by-step rollout for
 the Claude session on the org PC: [docs/ORG_AGENT_PROMPT.md](docs/ORG_AGENT_PROMPT.md) (0.1.0), then
 [docs/ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md](docs/ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md) (0.1.0 → 0.3.0 in one patch:

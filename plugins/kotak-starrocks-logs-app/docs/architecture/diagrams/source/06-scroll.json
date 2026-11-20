@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Infinite scroll: the next 1000 lines without gaps or repeats",
+    "output": "06-scroll/scroll.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "participants": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "User",
+      "sublabel": "scrolls the logs"
+    },
+    {
+      "id": "panel",
+      "type": "frontend",
+      "label": "Logs panel",
+      "sublabel": "Grafana, infinite scroll",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/panels.tsx",
+          "line": 86,
+          "end_line": 108,
+          "label": "logsPanel options"
+        }
+      ]
+    },
+    {
+      "id": "rt",
+      "type": "frontend",
+      "label": "Runtime DS",
+      "sublabel": "exact bounds, stable ids",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/sql/builder.ts",
+          "line": 74,
+          "end_line": 91,
+          "label": "exact bounds"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/StarRocksLogsDataSource.ts",
+          "line": 152,
+          "end_line": 164,
+          "label": "widened range"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/frames.ts",
+          "line": 117,
+          "end_line": 139,
+          "label": "stable ids"
+        }
+      ]
+    },
+    {
+      "id": "sr",
+      "type": "database",
+      "label": "StarRocks",
+      "sublabel": "via Grafana, as the user"
+    }
+  ],
+  "segments": [
+    {
+      "from": 160,
+      "to": 340,
+      "label": "1. First page"
+    },
+    {
+      "from": 350,
+      "to": 615,
+      "label": "2. Scroll to the end: next page"
+    }
+  ],
+  "messages": [
+    {
+      "id": "i-q1",
+      "from": "panel",
+      "to": "rt",
+      "y": 170,
+      "label": "query(last 1 h, 1000, newest first)",
+      "variant": "emphasis",
+      "note": "Bounds in SQL: ts >= from and ts < to + 1 ms, to the microsecond"
+    },
+    {
+      "id": "i-sql1",
+      "from": "rt",
+      "to": "sr",
+      "y": 230,
+      "label": "exact bounds + whole-second macro"
+    },
+    {
+      "id": "i-rows1",
+      "from": "sr",
+      "to": "rt",
+      "y": 258,
+      "label": "newest 1000 lines",
+      "variant": "return"
+    },
+    {
+      "id": "i-f1",
+      "from": "rt",
+      "to": "panel",
+      "y": 286,
+      "label": "frame with stable ids",
+      "variant": "return",
+      "note": "id = microsecond timestamp, pod, FNV-1a hash of the message"
+    },
+    {
+      "id": "i-wheel",
+      "from": "user",
+      "to": "panel",
+      "y": 360,
+      "label": "keep scrolling at the bottom",
+      "note": "Needs a chain of wheel or scroll events at the edge, and the oldest line more than 1 s after the range start"
+    },
+    {
+      "id": "i-q2",
+      "from": "panel",
+      "to": "rt",
+      "y": 430,
+      "label": "query(range start .. oldest line ms)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "i-sql2",
+      "from": "rt",
+      "to": "sr",
+      "y": 458,
+      "label": "same SQL, ts < oldest + 1 ms"
+    },
+    {
+      "id": "i-rows2",
+      "from": "sr",
+      "to": "rt",
+      "y": 486,
+      "label": "next 1000 (boundary ms again)",
+      "variant": "return"
+    },
+    {
+      "id": "i-f2",
+      "from": "rt",
+      "to": "panel",
+      "y": 514,
+      "label": "frame",
+      "variant": "return",
+      "note": "Grafana merges by time and id: the repeated boundary lines are dropped"
+    },
+    {
+      "id": "i-show",
+      "from": "panel",
+      "to": "user",
+      "y": 578,
+      "label": "2000 lines, no gap, no repeat",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "rt",
+      "from": 165,
+      "to": 292,
+      "type": "frontend"
+    },
+    {
+      "participant": "sr",
+      "from": 225,
+      "to": 264,
+      "type": "database"
+    },
+    {
+      "participant": "panel",
+      "from": 355,
+      "to": 584,
+      "type": "frontend"
+    },
+    {
+      "participant": "rt",
+      "from": 425,
+      "to": 520,
+      "type": "frontend"
+    },
+    {
+      "participant": "sr",
+      "from": 453,
+      "to": 492,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Why exact bounds",
+      "items": [
+        "$__timeFilter is cut to whole seconds; at about 1.6k lines a second that would skip or repeat lines",
+        "So line queries add ts >= microseconds_add(FROM_UNIXTIME(s), us) and ts < (to + 1 ms)",
+        "The macro range is widened to whole seconds around them, so partition pruning still applies"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Limits",
+      "items": [
+        "Logs display only; Table and JSON show the first lineLimit lines",
+        "On a relative range, scrolling up at the top loads lines newer than the newest shown",
+        "Loading stops when the oldest line is within 1 s of the range start"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,260 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "One panel query, step by step",
+    "output": "04-query/query.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "participants": [
+    {
+      "id": "panel",
+      "type": "frontend",
+      "label": "Panel",
+      "sublabel": "SceneQueryRunner",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/panels.tsx",
+          "line": 25,
+          "end_line": 29,
+          "label": "queryRunner"
+        }
+      ]
+    },
+    {
+      "id": "rt",
+      "type": "frontend",
+      "label": "Runtime DS",
+      "sublabel": "SQL in, frames out",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/StarRocksLogsDataSource.ts",
+          "line": 92,
+          "end_line": 119,
+          "label": "buildSql"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/StarRocksLogsDataSource.ts",
+          "line": 158,
+          "end_line": 178,
+          "label": "runLogsQuery"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/api.ts",
+          "line": 45,
+          "end_line": 94,
+          "label": "runSql"
+        }
+      ]
+    },
+    {
+      "id": "grafana",
+      "type": "backend",
+      "label": "Grafana",
+      "sublabel": "/api/ds/query"
+    },
+    {
+      "id": "ds",
+      "type": "backend",
+      "label": "StarRocks DS",
+      "sublabel": "identity, pool, macros",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-datasource/pkg/mysql/sqleng/sql_engine.go",
+          "line": 182,
+          "end_line": 237,
+          "label": "QueryData"
+        },
+        {
+          "path": "plugins/kotak-starrocks-datasource/pkg/mysql/sqleng/userpool.go",
+          "line": 111,
+          "end_line": 142,
+          "label": "per-user pool"
+        },
+        {
+          "path": "plugins/kotak-starrocks-datasource/pkg/mysql/macros.go",
+          "line": 67,
+          "end_line": 74,
+          "label": "$__timeFilter"
+        }
+      ]
+    },
+    {
+      "id": "sr",
+      "type": "database",
+      "label": "StarRocks FE",
+      "sublabel": "JWT login, Ranger",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-datasource/pkg/mysql/mysql.go",
+          "line": 74,
+          "end_line": 114,
+          "label": "connection config"
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "from": 160,
+      "to": 310,
+      "label": "1. Browser: build the SQL"
+    },
+    {
+      "from": 315,
+      "to": 625,
+      "label": "2. Grafana and the data source"
+    },
+    {
+      "from": 635,
+      "to": 730,
+      "label": "3. Browser: shape the result"
+    }
+  ],
+  "messages": [
+    {
+      "id": "q-run",
+      "from": "panel",
+      "to": "rt",
+      "y": 170,
+      "label": "query(kind, spec, range)",
+      "variant": "emphasis",
+      "note": "Time range, refresh and filters live in the scene; a change re-runs the query"
+    },
+    {
+      "id": "q-post",
+      "from": "rt",
+      "to": "grafana",
+      "y": 240,
+      "label": "POST /api/ds/query (rawSql)",
+      "variant": "emphasis",
+      "note": "Columns (cached) + tenant settings, then buildSql for the kind; line queries add exact microsecond bounds"
+    },
+    {
+      "id": "q-data",
+      "from": "grafana",
+      "to": "ds",
+      "y": 320,
+      "label": "QueryData + user's tokens",
+      "variant": "security",
+      "note": "OAuth pass-through; Grafana refreshes an expired token first"
+    },
+    {
+      "id": "q-login",
+      "from": "ds",
+      "to": "sr",
+      "y": 390,
+      "label": "login: sub claim + JWT (TLS)",
+      "variant": "security",
+      "note": "One pool per user, up to 5 connections; a new token retires the pool"
+    },
+    {
+      "id": "q-ok",
+      "from": "sr",
+      "to": "ds",
+      "y": 460,
+      "label": "JWT verified via JWKS",
+      "variant": "return"
+    },
+    {
+      "id": "q-sql",
+      "from": "ds",
+      "to": "sr",
+      "y": 490,
+      "label": "SQL, $__timeFilter expanded",
+      "variant": "emphasis",
+      "note": "Ranger checks SELECT on the view; a denial is error 5204"
+    },
+    {
+      "id": "q-rows",
+      "from": "sr",
+      "to": "ds",
+      "y": 550,
+      "label": "rows",
+      "variant": "return"
+    },
+    {
+      "id": "q-frame",
+      "from": "ds",
+      "to": "grafana",
+      "y": 580,
+      "label": "data frame",
+      "variant": "return"
+    },
+    {
+      "id": "q-json",
+      "from": "grafana",
+      "to": "rt",
+      "y": 610,
+      "label": "frames or an error",
+      "variant": "return"
+    },
+    {
+      "id": "q-shape",
+      "from": "rt",
+      "to": "panel",
+      "y": 650,
+      "label": "frames for the panel",
+      "variant": "return",
+      "note": "Logs: timestamp, body, severity, id, labels, traceID. Volumes: one series per level or value. Errors get an explanation"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "rt",
+      "from": 165,
+      "to": 660,
+      "type": "frontend"
+    },
+    {
+      "participant": "grafana",
+      "from": 235,
+      "to": 615,
+      "type": "backend"
+    },
+    {
+      "participant": "ds",
+      "from": 315,
+      "to": 585,
+      "type": "backend"
+    },
+    {
+      "participant": "sr",
+      "from": 385,
+      "to": 465,
+      "type": "database"
+    },
+    {
+      "participant": "sr",
+      "from": 485,
+      "to": 555,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "What travels",
+      "items": [
+        "Browser to Grafana: finished SQL text, data source uid, from/to in epoch ms",
+        "Grafana to the data source: the same, plus the user's IDAM tokens",
+        "Data source to StarRocks: SQL after macro expansion, on a connection opened with the user's JWT"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Who decides access",
+      "items": [
+        "StarRocks verifies the JWT signature with IDAM's JWKS",
+        "Ranger decides SELECT per view; the app only sees what the user may see"
+      ]
+    }
+  ]
+}

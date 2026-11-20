@@ -1,0 +1,398 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Configuration: from deploy-config to per-view settings",
+    "output": "07-config/config.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "components": [
+    {
+      "id": "loki",
+      "type": "cloud",
+      "label": "Loki data sources",
+      "sublabel": "tenant header, Tempo link",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/scripts/gen-tenants-from-loki.py",
+          "line": 45,
+          "end_line": 62,
+          "label": "tenant + trace"
+        }
+      ]
+    },
+    {
+      "id": "overrides",
+      "type": "backend",
+      "label": "tenants-overrides.yaml",
+      "sublabel": "level source, patterns",
+      "pos": [
+        270,
+        40
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "settings",
+      "type": "backend",
+      "label": "app-settings.yml",
+      "sublabel": "lineLimit, maxScanHours",
+      "pos": [
+        500,
+        40
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "gen",
+      "type": "backend",
+      "label": "gen-tenants-from-loki.py",
+      "sublabel": "app_id: '-' becomes '_'",
+      "pos": [
+        270,
+        180
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/scripts/gen-tenants-from-loki.py",
+          "line": 65,
+          "end_line": 102,
+          "label": "build()"
+        }
+      ]
+    },
+    {
+      "id": "prov",
+      "type": "database",
+      "label": "Provisioning file",
+      "sublabel": "apps: org_id + jsonData",
+      "pos": [
+        270,
+        320
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "grafana",
+      "type": "backend",
+      "label": "Grafana app settings",
+      "sublabel": "per org, autoEnabled",
+      "pos": [
+        270,
+        460
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/plugin.json",
+          "line": 1,
+          "end_line": 32,
+          "label": "plugin.json"
+        }
+      ]
+    },
+    {
+      "id": "resolve",
+      "type": "frontend",
+      "label": "resolveConfig",
+      "sublabel": "defaults, validation",
+      "pos": [
+        270,
+        600
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/config/config.ts",
+          "line": 129,
+          "end_line": 236,
+          "label": "resolveConfig"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/App.tsx",
+          "line": 59,
+          "end_line": 60,
+          "label": "read at app load"
+        }
+      ]
+    },
+    {
+      "id": "page",
+      "type": "frontend",
+      "label": "Configuration page",
+      "sublabel": "effective config, errors",
+      "pos": [
+        540,
+        600
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/AppConfig.tsx",
+          "line": 32,
+          "end_line": 136,
+          "label": "AppConfig"
+        }
+      ]
+    },
+    {
+      "id": "tenant",
+      "type": "frontend",
+      "label": "resolveTenant(view, ds)",
+      "sublabel": "ds/app_id, app_id, default",
+      "pos": [
+        270,
+        740
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/config/config.ts",
+          "line": 305,
+          "end_line": 325,
+          "label": "per field"
+        }
+      ]
+    },
+    {
+      "id": "level",
+      "type": "database",
+      "label": "Level in SQL",
+      "sublabel": "column or message regex",
+      "pos": [
+        40,
+        880
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/sql/builder.ts",
+          "line": 106,
+          "end_line": 121,
+          "label": "levelExpr"
+        }
+      ]
+    },
+    {
+      "id": "trace",
+      "type": "frontend",
+      "label": "View trace link",
+      "sublabel": "regex + Tempo uid",
+      "pos": [
+        270,
+        880
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/frames.ts",
+          "line": 93,
+          "end_line": 102,
+          "label": "traceID field"
+        }
+      ]
+    },
+    {
+      "id": "patterns",
+      "type": "database",
+      "label": "Patterns tab",
+      "sublabel": "named LIKE or regex",
+      "pos": [
+        500,
+        880
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/sql/builder.ts",
+          "line": 378,
+          "end_line": 394,
+          "label": "patternsQuery"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "deploy-config (per environment)",
+      "wraps": [
+        "loki",
+        "overrides",
+        "settings",
+        "gen"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Grafana pod",
+      "wraps": [
+        "prov",
+        "grafana"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "App in the browser",
+      "wraps": [
+        "resolve",
+        "page",
+        "tenant",
+        "level",
+        "trace",
+        "patterns"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "f-loki",
+      "from": "loki",
+      "to": "gen",
+      "label": "trace regex"
+    },
+    {
+      "id": "f-over",
+      "from": "overrides",
+      "to": "gen",
+      "label": "per app_id"
+    },
+    {
+      "id": "f-set",
+      "from": "settings",
+      "to": "gen",
+      "label": "other keys"
+    },
+    {
+      "id": "f-gen",
+      "from": "gen",
+      "to": "prov",
+      "label": "one entry per org",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-prov",
+      "from": "prov",
+      "to": "grafana",
+      "label": "read at startup",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-meta",
+      "from": "grafana",
+      "to": "resolve",
+      "label": "jsonData",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-page",
+      "from": "resolve",
+      "to": "page",
+      "label": "errors",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "f-tenant",
+      "from": "resolve",
+      "to": "tenant",
+      "label": "for the open view",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-level",
+      "from": "tenant",
+      "to": "level",
+      "label": "level"
+    },
+    {
+      "id": "f-trace",
+      "from": "tenant",
+      "to": "trace",
+      "label": "trace"
+    },
+    {
+      "id": "f-pat",
+      "from": "tenant",
+      "to": "patterns",
+      "label": "patterns"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The tenant is the view",
+      "items": [
+        "vw_eks_app_logs_<app_id>: Ranger decides who reads it",
+        "tenants is keyed by app_id (or <datasourceUid>/<app_id>) and holds display settings only",
+        "Loki header app-01996-x equals StarRocks app_id app_01996_x"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Validation",
+      "items": [
+        "Invalid entries are dropped one by one and listed on the configuration page",
+        "Regexes must compile (and have a capture group where one is needed)",
+        "Without any provisioning the app still runs with defaults"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "After Loki is removed",
+      "items": [
+        "The generator is a one-time bootstrap",
+        "The provisioning file in deploy-config becomes the only source and is edited directly"
+      ]
+    }
+  ]
+}

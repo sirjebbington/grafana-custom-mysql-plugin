@@ -1,0 +1,265 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Show context: the lines before and after one line",
+    "output": "05-context/context.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "participants": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "User",
+      "sublabel": "clicks a line"
+    },
+    {
+      "id": "modal",
+      "type": "frontend",
+      "label": "Context modal",
+      "sublabel": "Grafana Logs panel"
+    },
+    {
+      "id": "rt",
+      "type": "frontend",
+      "label": "Runtime DS",
+      "sublabel": "getLogRowContext",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/StarRocksLogsDataSource.ts",
+          "line": 207,
+          "end_line": 247,
+          "label": "getLogRowContext"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/sql/builder.ts",
+          "line": 396,
+          "end_line": 421,
+          "label": "contextQuery"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/frames.ts",
+          "line": 83,
+          "end_line": 90,
+          "label": "hidden __ts field"
+        }
+      ]
+    },
+    {
+      "id": "sr",
+      "type": "database",
+      "label": "StarRocks",
+      "sublabel": "via Grafana, as the user"
+    }
+  ],
+  "segments": [
+    {
+      "from": 160,
+      "to": 565,
+      "label": "1. Open: both directions load at once"
+    },
+    {
+      "from": 575,
+      "to": 760,
+      "label": "2. Scroll to an edge: the next 100"
+    }
+  ],
+  "messages": [
+    {
+      "id": "c-open",
+      "from": "user",
+      "to": "modal",
+      "y": 170,
+      "label": "Show context",
+      "variant": "emphasis",
+      "note": "Offered because the row's data source has getLogRowContext"
+    },
+    {
+      "id": "c-back",
+      "from": "modal",
+      "to": "rt",
+      "y": 230,
+      "label": "context(row, backward, 100)",
+      "variant": "emphasis",
+      "note": "Reads the row's hidden __ts (exact microseconds) and its pod: k8s_pod_uid, else k8s_pod_name"
+    },
+    {
+      "id": "c-back-sql",
+      "from": "rt",
+      "to": "sr",
+      "y": 300,
+      "label": "same pod, ts < line, 1 h back, DESC"
+    },
+    {
+      "id": "c-back-rows",
+      "from": "sr",
+      "to": "rt",
+      "y": 328,
+      "label": "up to 100 earlier lines",
+      "variant": "return"
+    },
+    {
+      "id": "c-back-frame",
+      "from": "rt",
+      "to": "modal",
+      "y": 356,
+      "label": "log frame",
+      "variant": "return"
+    },
+    {
+      "id": "c-fwd",
+      "from": "modal",
+      "to": "rt",
+      "y": 390,
+      "label": "context(row, forward, 100)"
+    },
+    {
+      "id": "c-fwd-sql",
+      "from": "rt",
+      "to": "sr",
+      "y": 418,
+      "label": "same pod, ts > line, 1 h ahead, ASC"
+    },
+    {
+      "id": "c-fwd-rows",
+      "from": "sr",
+      "to": "rt",
+      "y": 446,
+      "label": "up to 100 later lines",
+      "variant": "return"
+    },
+    {
+      "id": "c-fwd-frame",
+      "from": "rt",
+      "to": "modal",
+      "y": 474,
+      "label": "log frame",
+      "variant": "return"
+    },
+    {
+      "id": "c-show",
+      "from": "modal",
+      "to": "user",
+      "y": 506,
+      "label": "line in the middle",
+      "variant": "return",
+      "note": "Newest-first panel: later lines above, earlier lines below"
+    },
+    {
+      "id": "c-scroll",
+      "from": "user",
+      "to": "modal",
+      "y": 585,
+      "label": "scroll to the top or bottom"
+    },
+    {
+      "id": "c-more",
+      "from": "modal",
+      "to": "rt",
+      "y": 613,
+      "label": "context(edge row, same way, 100)",
+      "variant": "emphasis",
+      "note": "The outermost shown line is the new anchor; lines already shown are dropped"
+    },
+    {
+      "id": "c-more-sql",
+      "from": "rt",
+      "to": "sr",
+      "y": 683,
+      "label": "next 100 from the edge"
+    },
+    {
+      "id": "c-more-rows",
+      "from": "sr",
+      "to": "rt",
+      "y": 711,
+      "label": "rows",
+      "variant": "return"
+    },
+    {
+      "id": "c-more-frame",
+      "from": "rt",
+      "to": "modal",
+      "y": 739,
+      "label": "appended",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "modal",
+      "from": 165,
+      "to": 512,
+      "type": "frontend"
+    },
+    {
+      "participant": "rt",
+      "from": 225,
+      "to": 362,
+      "type": "frontend"
+    },
+    {
+      "participant": "rt",
+      "from": 385,
+      "to": 480,
+      "type": "frontend"
+    },
+    {
+      "participant": "sr",
+      "from": 295,
+      "to": 334,
+      "type": "database"
+    },
+    {
+      "participant": "sr",
+      "from": 413,
+      "to": 452,
+      "type": "database"
+    },
+    {
+      "participant": "modal",
+      "from": 580,
+      "to": 745,
+      "type": "frontend"
+    },
+    {
+      "participant": "rt",
+      "from": 608,
+      "to": 745,
+      "type": "frontend"
+    },
+    {
+      "participant": "sr",
+      "from": 678,
+      "to": 717,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "How the time is taken",
+      "items": [
+        "The line query also returns CAST(observed_timestamp AS VARCHAR) as a hidden __ts field",
+        "That exact text (e.g. 2026-11-20 13:25:15.852430) is the anchor, so no millisecond rounding",
+        "The window is up to 1 hour each way; each 'load more' moves the anchor to the edge line"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "What is and is not included",
+      "items": [
+        "Only lines of the same pod, regardless of the current filters, like Loki's context",
+        "Other lines with exactly the anchor's microsecond are left out (strict < and >)",
+        "No $__timeFilter: the bounds are constants on observed_timestamp, derived from the anchor"
+      ]
+    }
+  ]
+}

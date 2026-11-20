@@ -32,7 +32,8 @@ scripts/build-plugin.sh plugins/kotak-starrocks-datasource   # npm + Go tests, f
 scripts/build-plugin.sh plugins/kotak-starrocks-logs-app     # npm tests, frontend, zip, verify
 ```
 
-Each plugin's own README covers development and end-to-end tests. Org rollout instructions for the app (for
+Each plugin's own README covers development and end-to-end tests. The app's architecture guide, readable on a phone:
+[`plugins/kotak-starrocks-logs-app/docs/architecture`](plugins/kotak-starrocks-logs-app/docs/architecture/README.md). Org rollout instructions for the app (for
 the Claude session on the org PC): [`ORG_AGENT_PROMPT.md`](plugins/kotak-starrocks-logs-app/docs/ORG_AGENT_PROMPT.md)
 (0.1.0), then [`ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md`](plugins/kotak-starrocks-logs-app/docs/ORG_AGENT_PROMPT_3_UPGRADE_0.3.0.md)
 (0.1.0 → 0.3.0 in one patch: data source picker and the Logs Drilldown look; supersedes prompt 2).

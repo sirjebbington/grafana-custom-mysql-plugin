@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "diagram_type": "tree",
+  "meta": {
+    "title": "Scene tree: who owns which query",
+    "output": "10-scenes/scenes.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "layout": {
+    "direction": "right"
+  },
+  "nodes": [
+    {
+      "id": "root",
+      "label": "EmbeddedScene",
+      "sublabel": "$timeRange: SceneTimeRange",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/App.tsx",
+          "line": 21,
+          "end_line": 26,
+          "label": "getExploreScene"
+        }
+      ]
+    },
+    {
+      "id": "expl",
+      "label": "LogsExploration",
+      "sublabel": "URL state, header, ds + view",
+      "parent": "root",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 178,
+          "end_line": 230,
+          "label": "class"
+        }
+      ]
+    },
+    {
+      "id": "var",
+      "label": "AdHocFiltersVariable",
+      "sublabel": "label filter box",
+      "parent": "expl",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 132,
+          "end_line": 172,
+          "label": "filters variable"
+        }
+      ]
+    },
+    {
+      "id": "controls",
+      "label": "Time + refresh pickers",
+      "sublabel": "quick ranges to 24 h",
+      "parent": "expl"
+    },
+    {
+      "id": "body",
+      "label": "body",
+      "sublabel": "rebuilt when state changes",
+      "parent": "expl",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 757,
+          "end_line": 829,
+          "label": "buildBody"
+        }
+      ]
+    },
+    {
+      "id": "sel",
+      "label": "ServiceSelectionScene",
+      "sublabel": "page = selection",
+      "parent": "body",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/ServiceSelectionScene.tsx",
+          "line": 54,
+          "end_line": 189,
+          "label": "grid scene"
+        }
+      ]
+    },
+    {
+      "id": "selq",
+      "label": "runner: serviceVolume",
+      "sublabel": "1 GROUP BY, all values",
+      "parent": "sel"
+    },
+    {
+      "id": "selp",
+      "label": "one panel per value",
+      "sublabel": "bars, legend, row buttons",
+      "parent": "sel"
+    },
+    {
+      "id": "sels",
+      "label": "samples query",
+      "sublabel": "1 UNION ALL, page only",
+      "parent": "sel"
+    },
+    {
+      "id": "logs",
+      "label": "LogsTabScene",
+      "sublabel": "tab = logs",
+      "parent": "body",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsTabScene.tsx",
+          "line": 46,
+          "end_line": 105,
+          "label": "logs tab"
+        }
+      ]
+    },
+    {
+      "id": "logsv",
+      "label": "runner: volume",
+      "sublabel": "histogram by level",
+      "parent": "logs"
+    },
+    {
+      "id": "logsm",
+      "label": "runner: logs",
+      "sublabel": "Logs panel, infinite scroll",
+      "parent": "logs"
+    },
+    {
+      "id": "brk",
+      "label": "BreakdownScene",
+      "sublabel": "tab = labels / fields",
+      "parent": "body",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/BreakdownScene.tsx",
+          "line": 41,
+          "end_line": 138,
+          "label": "breakdowns"
+        }
+      ]
+    },
+    {
+      "id": "brkq",
+      "label": "runner: overview",
+      "sublabel": "or one value breakdown",
+      "parent": "brk"
+    },
+    {
+      "id": "brkm",
+      "label": "MessageFieldsScene",
+      "sublabel": "fields from a sample",
+      "parent": "brk"
+    },
+    {
+      "id": "pat",
+      "label": "PatternsTabScene",
+      "sublabel": "tab = patterns",
+      "parent": "body",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/PatternsTabScene.tsx",
+          "line": 42,
+          "end_line": 78,
+          "label": "patterns tab"
+        }
+      ]
+    },
+    {
+      "id": "patq",
+      "label": "runner: patterns",
+      "sublabel": "1 CASE scan",
+      "parent": "pat"
+    },
+    {
+      "id": "patd",
+      "label": "Suggest patterns",
+      "sublabel": "Drain, in the browser",
+      "parent": "pat"
+    },
+    {
+      "id": "guard",
+      "label": "messages",
+      "sublabel": "loading, errors, scan guard",
+      "parent": "body"
+    }
+  ]
+}

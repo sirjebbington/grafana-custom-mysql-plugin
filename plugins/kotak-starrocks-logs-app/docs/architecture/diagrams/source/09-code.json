@@ -1,0 +1,335 @@
+{
+  "schema_version": 1,
+  "diagram_type": "tree",
+  "meta": {
+    "title": "Code map: what each source file does",
+    "output": "09-code/code.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "layout": {
+    "direction": "right"
+  },
+  "nodes": [
+    {
+      "id": "src",
+      "label": "src/",
+      "sublabel": "kotak-starrocks-logs-app"
+    },
+    {
+      "id": "components",
+      "label": "components/",
+      "sublabel": "the screens (Scenes)",
+      "parent": "src"
+    },
+    {
+      "id": "app",
+      "label": "App.tsx",
+      "sublabel": "routes, settings, runtime DS",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/App.tsx",
+          "line": 1,
+          "end_line": 74
+        }
+      ]
+    },
+    {
+      "id": "expl",
+      "label": "LogsExploration.tsx",
+      "sublabel": "root scene, URL, header",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 1,
+          "end_line": 1052
+        }
+      ]
+    },
+    {
+      "id": "grid",
+      "label": "ServiceSelectionScene.tsx",
+      "sublabel": "service grid, Include",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/ServiceSelectionScene.tsx",
+          "line": 1,
+          "end_line": 373
+        }
+      ]
+    },
+    {
+      "id": "filters",
+      "label": "FiltersBar.tsx",
+      "sublabel": "levels, line search",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/FiltersBar.tsx",
+          "line": 1,
+          "end_line": 116
+        }
+      ]
+    },
+    {
+      "id": "logstab",
+      "label": "LogsTabScene.tsx",
+      "sublabel": "Logs tab, Explore link",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsTabScene.tsx",
+          "line": 1,
+          "end_line": 250
+        }
+      ]
+    },
+    {
+      "id": "breakdown",
+      "label": "BreakdownScene.tsx",
+      "sublabel": "Labels and Fields tabs",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/BreakdownScene.tsx",
+          "line": 1,
+          "end_line": 302
+        }
+      ]
+    },
+    {
+      "id": "patternstab",
+      "label": "PatternsTabScene.tsx",
+      "sublabel": "Patterns tab",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/PatternsTabScene.tsx",
+          "line": 1,
+          "end_line": 252
+        }
+      ]
+    },
+    {
+      "id": "panels",
+      "label": "panels.tsx",
+      "sublabel": "panels, query runners",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/panels.tsx",
+          "line": 1,
+          "end_line": 140
+        }
+      ]
+    },
+    {
+      "id": "appconfig",
+      "label": "AppConfig.tsx",
+      "sublabel": "configuration page",
+      "parent": "components",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/AppConfig.tsx",
+          "line": 1,
+          "end_line": 136
+        }
+      ]
+    },
+    {
+      "id": "datasource",
+      "label": "datasource/",
+      "sublabel": "queries and results",
+      "parent": "src"
+    },
+    {
+      "id": "rtds",
+      "label": "StarRocksLogsDataSource.ts",
+      "sublabel": "runtime DS, context",
+      "parent": "datasource",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/StarRocksLogsDataSource.ts",
+          "line": 1,
+          "end_line": 261
+        }
+      ]
+    },
+    {
+      "id": "dsapi",
+      "label": "api.ts",
+      "sublabel": "runSql, views, columns",
+      "parent": "datasource",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/api.ts",
+          "line": 1,
+          "end_line": 156
+        }
+      ]
+    },
+    {
+      "id": "frames",
+      "label": "frames.ts",
+      "sublabel": "rows to Grafana frames",
+      "parent": "datasource",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/frames.ts",
+          "line": 1,
+          "end_line": 330
+        }
+      ]
+    },
+    {
+      "id": "sql",
+      "label": "sql/",
+      "sublabel": "SQL text",
+      "parent": "src"
+    },
+    {
+      "id": "builder",
+      "label": "builder.ts",
+      "sublabel": "every SQL statement",
+      "parent": "sql",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/sql/builder.ts",
+          "line": 1,
+          "end_line": 421
+        }
+      ]
+    },
+    {
+      "id": "config",
+      "label": "config/",
+      "sublabel": "app settings",
+      "parent": "src"
+    },
+    {
+      "id": "configts",
+      "label": "config.ts",
+      "sublabel": "defaults, checks, tenants",
+      "parent": "config",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/config/config.ts",
+          "line": 1,
+          "end_line": 339
+        }
+      ]
+    },
+    {
+      "id": "state",
+      "label": "state/",
+      "sublabel": "screen state",
+      "parent": "src"
+    },
+    {
+      "id": "types",
+      "label": "types.ts",
+      "sublabel": "QuerySpec, filters",
+      "parent": "state",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/state/types.ts",
+          "line": 1,
+          "end_line": 69
+        }
+      ]
+    },
+    {
+      "id": "url",
+      "label": "url.ts",
+      "sublabel": "URL filter encoding",
+      "parent": "state",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/state/url.ts",
+          "line": 1,
+          "end_line": 75
+        }
+      ]
+    },
+    {
+      "id": "storage",
+      "label": "storage.ts",
+      "sublabel": "last view, favourites",
+      "parent": "state",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/state/storage.ts",
+          "line": 1,
+          "end_line": 51
+        }
+      ]
+    },
+    {
+      "id": "patterns",
+      "label": "patterns/",
+      "sublabel": "text helpers",
+      "parent": "src"
+    },
+    {
+      "id": "drain",
+      "label": "drain.ts",
+      "sublabel": "pattern suggestions",
+      "parent": "patterns",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/patterns/drain.ts",
+          "line": 1,
+          "end_line": 143
+        }
+      ]
+    },
+    {
+      "id": "msgfields",
+      "label": "messageFields.ts",
+      "sublabel": "key=value fields",
+      "parent": "patterns",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/patterns/messageFields.ts",
+          "line": 1,
+          "end_line": 60
+        }
+      ]
+    },
+    {
+      "id": "constants",
+      "label": "constants.ts",
+      "sublabel": "columns, levels, ranges",
+      "parent": "src",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/constants.ts",
+          "line": 1,
+          "end_line": 79
+        }
+      ]
+    },
+    {
+      "id": "pluginjson",
+      "label": "plugin.json",
+      "sublabel": "id, name, autoEnabled",
+      "parent": "src",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/plugin.json",
+          "line": 1,
+          "end_line": 43
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,266 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Opening the app: data source, view, service grid",
+    "output": "02-startup/startup.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "participants": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "User",
+      "sublabel": "browser"
+    },
+    {
+      "id": "app",
+      "type": "frontend",
+      "label": "LogsExploration",
+      "sublabel": "root scene, owns the URL",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 344,
+          "end_line": 397,
+          "label": "loadDatasources"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 398,
+          "end_line": 433,
+          "label": "applyViews, loadContext"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/App.tsx",
+          "line": 59,
+          "end_line": 74,
+          "label": "config, runtime DS"
+        }
+      ]
+    },
+    {
+      "id": "grafana",
+      "type": "backend",
+      "label": "Grafana + data source",
+      "sublabel": "/api/ds/query as the user",
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/api.ts",
+          "line": 133,
+          "end_line": 156,
+          "label": "fetchViews, fetchColumns"
+        }
+      ]
+    },
+    {
+      "id": "sr",
+      "type": "database",
+      "label": "StarRocks",
+      "sublabel": "Ranger-filtered"
+    }
+  ],
+  "segments": [
+    {
+      "from": 160,
+      "to": 410,
+      "label": "1. Pick a data source"
+    },
+    {
+      "from": 420,
+      "to": 605,
+      "label": "2. Pick a view"
+    },
+    {
+      "from": 615,
+      "to": 800,
+      "label": "3. Draw the service grid"
+    }
+  ],
+  "messages": [
+    {
+      "id": "open",
+      "from": "user",
+      "to": "app",
+      "y": 170,
+      "label": "open .../explore",
+      "variant": "emphasis",
+      "note": "App.tsx resolves the app settings and registers the runtime data source; ds, view and filters are read from the URL"
+    },
+    {
+      "id": "views",
+      "from": "app",
+      "to": "grafana",
+      "y": 245,
+      "label": "SHOW TABLES LIKE 'vw_eks_app_logs_%'",
+      "variant": "emphasis",
+      "note": "Order tried: URL ds, last used, configured default, the rest"
+    },
+    {
+      "id": "views-sr",
+      "from": "grafana",
+      "to": "sr",
+      "y": 305,
+      "label": "JWT login, SHOW TABLES",
+      "variant": "security"
+    },
+    {
+      "id": "views-rows",
+      "from": "sr",
+      "to": "grafana",
+      "y": 333,
+      "label": "views this user may read",
+      "variant": "return"
+    },
+    {
+      "id": "views-back",
+      "from": "grafana",
+      "to": "app",
+      "y": 361,
+      "label": "sorted view list",
+      "variant": "return",
+      "note": "Empty or error: try the next data source, keep the reason for the picker"
+    },
+    {
+      "id": "cols",
+      "from": "app",
+      "to": "grafana",
+      "y": 430,
+      "label": "SELECT * FROM <view> LIMIT 0",
+      "note": "View: the URL's if readable, else the last used here, else the first"
+    },
+    {
+      "id": "cols-sr",
+      "from": "grafana",
+      "to": "sr",
+      "y": 490,
+      "label": "same query, as the user"
+    },
+    {
+      "id": "cols-rows",
+      "from": "sr",
+      "to": "grafana",
+      "y": 518,
+      "label": "column names, no rows",
+      "variant": "return"
+    },
+    {
+      "id": "cols-back",
+      "from": "grafana",
+      "to": "app",
+      "y": 546,
+      "label": "columns (cached)",
+      "variant": "return",
+      "note": "Tenant settings resolved for the view: level source, trace link, patterns"
+    },
+    {
+      "id": "volume",
+      "from": "app",
+      "to": "grafana",
+      "y": 625,
+      "label": "volume per service and level (GROUP BY)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "samples",
+      "from": "app",
+      "to": "grafana",
+      "y": 653,
+      "label": "newest 10 lines per visible service (UNION ALL)"
+    },
+    {
+      "id": "grid-sr",
+      "from": "grafana",
+      "to": "sr",
+      "y": 681,
+      "label": "both, as the user"
+    },
+    {
+      "id": "grid-rows",
+      "from": "sr",
+      "to": "grafana",
+      "y": 709,
+      "label": "rows",
+      "variant": "return"
+    },
+    {
+      "id": "grid",
+      "from": "app",
+      "to": "user",
+      "y": 737,
+      "label": "service grid",
+      "variant": "return",
+      "note": "URL now has ds and view; the choice is saved in this browser"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "app",
+      "from": 165,
+      "to": 745,
+      "type": "frontend"
+    },
+    {
+      "participant": "grafana",
+      "from": 240,
+      "to": 366,
+      "type": "backend"
+    },
+    {
+      "participant": "grafana",
+      "from": 425,
+      "to": 551,
+      "type": "backend"
+    },
+    {
+      "participant": "grafana",
+      "from": 620,
+      "to": 714,
+      "type": "backend"
+    },
+    {
+      "participant": "sr",
+      "from": 300,
+      "to": 338,
+      "type": "database"
+    },
+    {
+      "participant": "sr",
+      "from": 485,
+      "to": 523,
+      "type": "database"
+    },
+    {
+      "participant": "sr",
+      "from": 676,
+      "to": 714,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Four queries to the first screen",
+      "items": [
+        "SHOW TABLES (once per data source tried)",
+        "SELECT * ... LIMIT 0 for the column list, cached per data source and view",
+        "One GROUP BY for every service's volume, one UNION ALL for the newest lines of the visible page"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Never stuck without a view",
+      "items": [
+        "An empty or unknown view in the URL is ignored, not applied",
+        "If the body finds no valid view while views exist, it picks one again"
+      ]
+    }
+  ]
+}

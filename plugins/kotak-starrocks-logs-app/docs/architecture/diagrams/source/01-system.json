@@ -1,0 +1,383 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Logs Drilldown (StarRocks): one query, browser to Iceberg",
+    "output": "01-system/system.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/sirjebbington/grafana-custom-mysql-plugin.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "4107a6f252e9ea163ea05cc69b59e0feec2135b3"
+    }
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "Signed-in user",
+      "sublabel": "browser, IDAM SSO session",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        230,
+        64
+      ]
+    },
+    {
+      "id": "app",
+      "type": "frontend",
+      "label": "Logs Drilldown (StarRocks)",
+      "sublabel": "Scenes app in the browser",
+      "pos": [
+        40,
+        160
+      ],
+      "size": [
+        230,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/App.tsx",
+          "line": 59,
+          "end_line": 74,
+          "label": "app entry"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/components/LogsExploration.tsx",
+          "line": 178,
+          "end_line": 229,
+          "label": "root scene"
+        }
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "frontend",
+      "label": "Runtime data source",
+      "sublabel": "kind + spec to SQL text",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        230,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/StarRocksLogsDataSource.ts",
+          "line": 158,
+          "end_line": 205,
+          "label": "query()"
+        },
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/api.ts",
+          "line": 45,
+          "end_line": 94,
+          "label": "runSql"
+        }
+      ]
+    },
+    {
+      "id": "grafana",
+      "type": "backend",
+      "label": "Grafana server",
+      "sublabel": "/api/ds/query, OAuth middleware",
+      "pos": [
+        40,
+        400
+      ],
+      "size": [
+        230,
+        64
+      ]
+    },
+    {
+      "id": "plugin",
+      "type": "backend",
+      "label": "kotak-starrocks-datasource",
+      "sublabel": "macros, per-user pool",
+      "pos": [
+        40,
+        520
+      ],
+      "size": [
+        230,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-datasource/pkg/mysql/sqleng/sql_engine.go",
+          "line": 182,
+          "end_line": 237,
+          "label": "QueryData"
+        },
+        {
+          "path": "plugins/kotak-starrocks-datasource/pkg/mysql/sqleng/identity.go",
+          "line": 58,
+          "end_line": 95,
+          "label": "token to username"
+        },
+        {
+          "path": "plugins/kotak-starrocks-datasource/pkg/mysql/macros.go",
+          "line": 67,
+          "end_line": 74,
+          "label": "$__timeFilter"
+        }
+      ]
+    },
+    {
+      "id": "fe",
+      "type": "database",
+      "label": "StarRocks FE",
+      "sublabel": "verifies the JWT, plans SQL",
+      "pos": [
+        40,
+        640
+      ],
+      "size": [
+        230,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-datasource/pkg/mysql/mysql.go",
+          "line": 74,
+          "end_line": 114,
+          "label": "login config"
+        }
+      ]
+    },
+    {
+      "id": "views",
+      "type": "database",
+      "label": "vw_eks_app_logs_<app_id>",
+      "sublabel": "one view per tenant",
+      "pos": [
+        40,
+        760
+      ],
+      "size": [
+        230,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/api.ts",
+          "line": 133,
+          "end_line": 156,
+          "label": "views, columns"
+        }
+      ]
+    },
+    {
+      "id": "iceberg",
+      "type": "cloud",
+      "label": "eks_app_logs (Iceberg)",
+      "sublabel": "S3, partitions app_id + hour",
+      "pos": [
+        40,
+        880
+      ],
+      "size": [
+        230,
+        64
+      ]
+    },
+    {
+      "id": "tempo",
+      "type": "backend",
+      "label": "Tempo",
+      "sublabel": "the tenant's traces",
+      "pos": [
+        440,
+        160
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/frames.ts",
+          "line": 21,
+          "end_line": 32,
+          "label": "trace link"
+        }
+      ]
+    },
+    {
+      "id": "idam",
+      "type": "security",
+      "label": "IDAM (OIDC)",
+      "sublabel": "tokens, JWKS keys",
+      "pos": [
+        440,
+        520
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "ranger",
+      "type": "security",
+      "label": "Ranger policies",
+      "sublabel": "SELECT per view, per user",
+      "pos": [
+        440,
+        760
+      ],
+      "size": [
+        200,
+        64
+      ],
+      "sources": [
+        {
+          "path": "plugins/kotak-starrocks-logs-app/src/datasource/api.ts",
+          "line": 110,
+          "end_line": 126,
+          "label": "5204 explained"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "User's browser",
+      "wraps": [
+        "app",
+        "runtime"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Grafana pod",
+      "wraps": [
+        "grafana",
+        "plugin"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "StarRocks cluster",
+      "wraps": [
+        "fe",
+        "views",
+        "ranger"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "open",
+      "from": "user",
+      "to": "app",
+      "label": "opens the app",
+      "variant": "emphasis"
+    },
+    {
+      "id": "structured",
+      "from": "app",
+      "to": "runtime",
+      "label": "query: kind + spec"
+    },
+    {
+      "id": "post",
+      "from": "runtime",
+      "to": "grafana",
+      "label": "POST /api/ds/query (rawSql)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "querydata",
+      "from": "grafana",
+      "to": "plugin",
+      "label": "QueryData + user's ID token",
+      "variant": "security"
+    },
+    {
+      "id": "login",
+      "from": "plugin",
+      "to": "fe",
+      "label": "MySQL login: JWT as password, TLS",
+      "variant": "security"
+    },
+    {
+      "id": "select",
+      "from": "fe",
+      "to": "views",
+      "label": "SELECT on the view"
+    },
+    {
+      "id": "scan",
+      "from": "views",
+      "to": "iceberg",
+      "label": "WHERE app_id = tenant, pruned"
+    },
+    {
+      "id": "trace",
+      "from": "app",
+      "to": "tempo",
+      "label": "View trace link",
+      "variant": "dashed"
+    },
+    {
+      "id": "refresh",
+      "from": "grafana",
+      "to": "idam",
+      "label": "refresh token",
+      "variant": "security"
+    },
+    {
+      "id": "jwks",
+      "from": "fe",
+      "to": "idam",
+      "label": "fetch JWKS",
+      "variant": "security"
+    },
+    {
+      "id": "policy",
+      "from": "fe",
+      "to": "ranger",
+      "label": "check SELECT",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Identity",
+      "items": [
+        "Grafana attaches the user's IDAM tokens to every /api/ds/query call",
+        "The data source logs in to StarRocks as that user, the JWT is the password",
+        "Ranger allows or denies per view; the app adds no access path"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Where the SQL comes from",
+      "items": [
+        "Built in the browser by sql/builder.ts from the screen state",
+        "Values are escaped; column names must exist in the view",
+        "The data source expands $__timeFilter, so StarRocks prunes hourly partitions"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Side paths",
+      "items": [
+        "A trace id found in a line links to the tenant's Tempo in Explore",
+        "StarRocks fetches IDAM's JWKS at each new login to verify the JWT"
+      ]
+    }
+  ]
+}
