@@ -12,3 +12,4 @@ artifacts/
 /playwright/.auth/
 dev/e2e/.state/
 .idea
+__pycache__/

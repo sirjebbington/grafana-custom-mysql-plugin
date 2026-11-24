@@ -1,7 +1,7 @@
 import { css } from '@emotion/css';
 import { useState } from 'react';
 
-import { GrafanaTheme2, rangeUtil } from '@grafana/data';
+import { GrafanaTheme2, dateTimeFormat, rangeUtil } from '@grafana/data';
 import {
   AdHocFiltersVariable,
   SceneComponentProps,
@@ -15,11 +15,12 @@ import {
   SceneTimePicker,
   sceneGraph,
 } from '@grafana/scenes';
-import { Alert, Button, IconButton, InlineField, Select, Tab, TabsBar, useStyles2 } from '@grafana/ui';
+import { Alert, Button, IconButton, InlineField, Select, Tab, TabsBar, Tooltip, useStyles2 } from '@grafana/ui';
 
 import { LEVELS, QUICK_RANGES, RUNTIME_DS } from '../constants';
 import { getAppConfig, getAppConfigErrors, viewPrefixFor } from '../config/config';
 import { fetchViews, listDatasources, runSqlOnce, StarRocksDatasource, stringColumn } from '../datasource/api';
+import { fetchOldestLog } from '../datasource/oldest';
 import { buildContext } from '../datasource/StarRocksLogsDataSource';
 import { BuildContext, labelValuesQuery, needsMessageScan } from '../sql/builder';
 import { getLastSelection, setLastSelection } from '../state/storage';
@@ -45,6 +46,7 @@ import {
 } from '../state/types';
 import { Display, displayLabel, ExplorationApi, isExplorationApi, Tab as TabName } from './api';
 import { BreakdownScene, MESSAGE_FIELD_PREFIX } from './BreakdownScene';
+import { quickRangeMs } from '../state/timeRange';
 import { DetailsHeader } from './FiltersBar';
 import { LogsTabScene } from './LogsTabScene';
 import { PatternsTabScene } from './PatternsTabScene';
@@ -86,6 +88,8 @@ export interface LogsExplorationState extends SceneObjectState {
   search: string;
   /** time range (raw from|to) for which the user accepted a long text scan */
   scanAllowedFor?: string;
+  /** oldest line of the selected view ("Oldest log"), looked up in the background */
+  oldest?: { key: string; ms?: number | null; loading?: boolean; error?: string };
   body?: SceneObject;
   controls: SceneObject[];
 }
@@ -164,7 +168,8 @@ function createLabelFiltersVariable(): AdHocFiltersVariable {
         labelValuesQuery(spec, ctx, filter.key, 200),
         sceneGraph.getTimeRange(ex).state.value,
         'values',
-        spec.datasource
+        spec.datasource,
+        { view: spec.view }
       );
       return { replace: true, values: stringColumn(frames[0], 'v').map((v) => ({ text: v, value: v })) };
     },
@@ -196,7 +201,14 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       display: 'logs',
       wrap: false,
       search: '',
-      controls: [new SceneTimePicker({ quickRanges: QUICK_RANGES }), new SceneRefreshPicker({})],
+      controls: [
+        new SceneTimePicker({
+          quickRanges: QUICK_RANGES.filter(
+            (r) => (quickRangeMs(r.from) ?? 0) <= getAppConfig().maxRangeHours * 3_600_000
+          ),
+        }),
+        new SceneRefreshPicker({}),
+      ],
       ...state,
     });
     this.addActivationHandler(() => {
@@ -420,6 +432,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       const ctx = await buildContext(view, sceneGraph.getTimeRange(this).state.value, this.state.datasource ?? '');
       if (req === this.ctxRequest) {
         this.setState({ ctx });
+        this.loadOldest(view);
       }
     } catch (e) {
       if (req === this.ctxRequest) {
@@ -428,6 +441,27 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     }
     if (req === this.ctxRequest) {
       this.rebuild();
+    }
+  }
+
+  /** "Oldest log": the oldest line of the view (cached per browser for a few hours), in the background. */
+  private async loadOldest(view: string) {
+    const ds = this.state.datasource ?? '';
+    const key = `${ds}/${view}`;
+    if (this.state.oldest?.key === key && !this.state.oldest.error) {
+      return;
+    }
+    this.setState({ oldest: { key, loading: true } });
+    const current = () => `${this.state.datasource ?? ''}/${this.state.view ?? ''}` === key;
+    try {
+      const ms = await fetchOldestLog(view, ds);
+      if (current()) {
+        this.setState({ oldest: { key, ms: ms ?? null } });
+      }
+    } catch (e) {
+      if (current()) {
+        this.setState({ oldest: { key, error: e instanceof Error ? e.message : String(e) } });
+      }
     }
   }
 
@@ -804,9 +838,17 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     const { display, sort, limit, wrap } = this.getDisplay();
     switch (s.tab) {
       case 'logs':
-        return blocked && textScan
-          ? this.guard(reason)
-          : new LogsTabScene({ spec, withLevel: !levelSkipped, display, sort, limit, wrap });
+        // no guard: the lines are searched newest first and stop at the line limit; only the volume chart
+        // (which reads every line) waits for the user
+        return new LogsTabScene({
+          spec,
+          withLevel: !levelSkipped,
+          volumeDeferred: blocked && textScan,
+          display,
+          sort,
+          limit,
+          wrap,
+        });
       case 'labels':
       case 'fields': {
         const messageBreakdown = s.breakdown?.startsWith(MESSAGE_FIELD_PREFIX) ?? false;
@@ -877,6 +919,7 @@ function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>
           </div>
         </div>
         <div className={styles.right}>
+          <OldestLog model={model} />
           <InlineField label="Data source">
             <Select
               width={22}
@@ -937,8 +980,65 @@ function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>
       ) : (
         view && ctx && <LabelTabs model={model} />
       )}
+      <BeforeOldestNotice model={model} />
       <div className={styles.body}>{body && <body.Component model={body} />}</div>
     </div>
+  );
+}
+
+/**
+ * "Oldest log": the time of the view's oldest line, so users know how far back they can look (like the
+ * "Oldest Record" of the internal Log Analytics UI).
+ */
+function OldestLog({ model }: { model: LogsExploration }) {
+  const styles = useStyles2(getStyles);
+  const { oldest, view } = model.useState();
+  const timeZone = sceneGraph.getTimeRange(model).getTimeZone();
+  if (!oldest || !view || oldest.error) {
+    return null;
+  }
+  const text = oldest.loading
+    ? '…'
+    : oldest.ms === null || oldest.ms === undefined
+      ? 'no lines'
+      : dateTimeFormat(oldest.ms, { format: 'D MMM YYYY HH:mm', timeZone });
+  const tip =
+    oldest.ms !== null && oldest.ms !== undefined
+      ? `Oldest line in ${view}: ${dateTimeFormat(oldest.ms, { format: 'YYYY-MM-DD HH:mm:ss', timeZone })}`
+      : `Looking up the oldest line in ${view}`;
+  return (
+    <Tooltip content={tip}>
+      <div className={styles.oldest} data-testid="oldest-log">
+        <span className={styles.oldestLabel}>Oldest log</span>
+        <span>{text}</span>
+      </div>
+    </Tooltip>
+  );
+}
+
+/** Shown when the whole time range is before the view's oldest line: nothing to find there. */
+function BeforeOldestNotice({ model }: { model: LogsExploration }) {
+  const { oldest, view } = model.useState();
+  const timeRange = sceneGraph.getTimeRange(model);
+  const { value } = timeRange.useState();
+  const ms = oldest?.ms;
+  if (ms === null || ms === undefined || value.to.valueOf() >= ms) {
+    return null;
+  }
+  const hours = getAppConfig().maxRangeHours;
+  const when = dateTimeFormat(ms, { format: 'D MMM YYYY HH:mm', timeZone: timeRange.getTimeZone() });
+  const showFirst = () => {
+    const to = Math.min(ms + hours * 3_600_000, Date.now());
+    timeRange.onTimeRangeChange(
+      rangeUtil.convertRawToRange({ from: new Date(ms).toISOString(), to: new Date(to).toISOString() })
+    );
+  };
+  return (
+    <Alert severity="info" title={`No logs in this time range: ${view} starts on ${when}`} data-testid="before-oldest">
+      <Button size="sm" variant="secondary" onClick={showFirst}>
+        Show the first {hours} hours of logs
+      </Button>
+    </Alert>
   );
 }
 
@@ -1048,5 +1148,13 @@ const getStyles = (theme: GrafanaTheme2) => ({
     marginLeft: 'auto',
   }),
   addLabel: css({ marginLeft: theme.spacing(1), alignSelf: 'center' }),
+  oldest: css({
+    display: 'flex',
+    flexDirection: 'column',
+    lineHeight: 1.2,
+    fontSize: theme.typography.bodySmall.fontSize,
+    whiteSpace: 'nowrap',
+  }),
+  oldestLabel: css({ color: theme.colors.text.secondary }),
   body: css({ paddingTop: theme.spacing(1), minWidth: 0 }),
 });

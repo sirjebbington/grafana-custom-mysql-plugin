@@ -3,7 +3,9 @@ import { DataFrame, DataFrameType, DataLink, Field, FieldType, TimeRange, create
 import { DETECTED_LEVEL, LEVELS, POD_UID_COLUMN, TIME_COLUMN } from '../constants';
 import { ResolvedTenant, TraceConfig } from '../config/config';
 
-const INTERNAL_COLUMNS = new Set([TIME_COLUMN, '__ts', 'message', DETECTED_LEVEL, '__value']);
+const INTERNAL_COLUMNS = new Set([TIME_COLUMN, '__ms', '__ts', 'message', DETECTED_LEVEL, '__value']);
+// line queries return the time as epoch ms (__ms, computed by StarRocks in the session zone)
+const TIME_MS = '__ms';
 
 function col(frame: DataFrame, name: string): unknown[] {
   return frame.fields.find((f) => f.name === name)?.values ?? [];
@@ -44,7 +46,7 @@ export interface LogsFrameOptions {
  * field with an Explore link to Tempo when the tenant has a trace regex.
  */
 export function toLogsFrame(frame: DataFrame, opts: LogsFrameOptions): DataFrame {
-  const ts = col(frame, TIME_COLUMN);
+  const ts = frame.fields.some((f) => f.name === TIME_MS) ? col(frame, TIME_MS).map(Number) : col(frame, TIME_COLUMN);
   const tsRaw = col(frame, '__ts');
   const msg = col(frame, 'message');
   const lvl = col(frame, DETECTED_LEVEL);
@@ -322,9 +324,30 @@ export function toPatternFrames(frame: DataFrame | undefined, range: TimeRange, 
 
 /** Plain table of the line query result (Table view). Internal helper columns are removed. */
 export function toTableFrame(frame: DataFrame, refId: string): DataFrame {
+  const fields = frame.fields
+    .filter((f) => f.name !== '__ts' && f.name !== '__value')
+    .map((f) =>
+      f.name === TIME_MS
+        ? { ...f, name: TIME_COLUMN, type: FieldType.time, values: f.values.map(Number), config: {} }
+        : f
+    );
+  return createDataFrame({ refId, fields, meta: { ...frame.meta, preferredVisualisationType: 'table' } });
+}
+
+/**
+ * Joins frames of the same query shape (the windows of a newest-first search) into one, rows in order.
+ * Frames whose field names differ from the first one are skipped.
+ */
+export function concatFrames(frames: DataFrame[]): DataFrame {
+  if (frames.length === 1) {
+    return frames[0];
+  }
+  const first = frames[0];
+  const names = first.fields.map((f) => f.name).join('\u0000');
+  const same = frames.filter((f) => f.fields.map((x) => x.name).join('\u0000') === names);
   return createDataFrame({
-    refId,
-    fields: frame.fields.filter((f) => f.name !== '__ts' && f.name !== '__value'),
-    meta: { ...frame.meta, preferredVisualisationType: 'table' },
+    refId: first.refId,
+    meta: first.meta,
+    fields: first.fields.map((f, i) => ({ ...f, values: same.flatMap((fr) => fr.fields[i].values) })),
   });
 }

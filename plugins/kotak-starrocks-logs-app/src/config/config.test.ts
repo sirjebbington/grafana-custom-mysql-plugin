@@ -49,6 +49,23 @@ describe('resolveConfig', () => {
     expect(errors.length).toBe(6);
   });
 
+  it('range, timeout and time zone settings: defaults and validation', () => {
+    const d = resolveConfig({}).config;
+    expect(d.maxRangeHours).toBe(24);
+    expect(d.queryTimeoutSeconds).toBe(120);
+    expect(d.timeZone).toBe('auto');
+    for (const timeZone of ['session', '+00:00', '-03:30', 'Asia/Kolkata', 'UTC']) {
+      expect(resolveConfig({ timeZone }).errors).toEqual([]);
+    }
+    const { config, errors } = resolveConfig({ maxRangeHours: 12, queryTimeoutSeconds: 0, timeZone: '+05:30' });
+    expect(errors).toEqual([]);
+    expect([config.maxRangeHours, config.queryTimeoutSeconds, config.timeZone]).toEqual([12, 0, '+05:30']);
+    const bad = resolveConfig({ maxRangeHours: 0, queryTimeoutSeconds: 1.5, timeZone: "x'; DROP" });
+    expect(bad.errors).toHaveLength(3);
+    expect(bad.config.maxRangeHours).toBe(24);
+    expect(bad.config.timeZone).toBe('auto');
+  });
+
   it('accepts RE2 (?i) prefixes', () => {
     const { errors } = resolveConfig({ tenants: { a: { level: { source: 'message', regex: '(?i)level=(\\w+)' } } } });
     expect(errors).toEqual([]);

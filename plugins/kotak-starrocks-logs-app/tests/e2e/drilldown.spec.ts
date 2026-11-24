@@ -377,6 +377,8 @@ test.describe('as kmbl3e2e (two granted views)', () => {
     const href = await page.getByTestId('open-in-explore').getAttribute('href');
     expect(decodeURIComponent(href ?? '')).toContain('rawSql');
     expect(decodeURIComponent(href ?? '')).toContain(OBS);
+    // Explore runs it in UTC too (the e2e StarRocks session is Asia/Kolkata)
+    expect(decodeURIComponent(href ?? '')).toContain("SET_VAR(time_zone = '+00:00'");
   });
 
   test('labels tab: overview, value breakdown, include', async ({ page }) => {
@@ -436,16 +438,126 @@ test.describe('as kmbl3e2e (two granted views)', () => {
     await expect(logsMain(page)).not.toContainText('created order');
   });
 
-  test('long text scans are guarded; Run anyway runs them', async ({ page }) => {
+  test('long text search: the Logs tab is not blocked, lines come newest first, volume on request', async ({
+    page,
+  }) => {
+    // the e2e maxScanHours is 3: 6 hours with a line search was blocked before 0.4.0
     const line = ['include', '0', '0', encodeURIComponent('timed out')].join('|');
     await page.goto(
       appUrl({ view: OBS, filter: filter('k8s_service_name', '=', 'proxy'), line, from: 'now-6h', to: 'now' })
     );
+    await expect(logsMain(page)).toContainText('upstream timed out');
+    await expect(page.getByTestId('scan-guard')).toHaveCount(0);
+    await expect(page.getByTestId('volume-deferred')).toBeVisible();
+    await expect(page.getByTestId('volume-deferred')).toContainText('6 hours');
+    await page.screenshot({ path: `${SHOTS}/09-long-text-search.png` });
+    await page.getByRole('button', { name: 'Load volume' }).click();
+    await expect(page.getByTestId('volume-deferred')).toHaveCount(0);
+    await expect(page.getByText('Log volume', { exact: true })).toBeVisible();
+    await expect(logsMain(page)).toContainText('upstream timed out');
+  });
+
+  test('long text search: lines appear window by window with progress, and Stop ends the search', async ({ page }) => {
+    // slow down each window of the search (line queries with exact bounds and a text filter)
+    await page.route('**/api/ds/query**', async (route) => {
+      const body = route.request().postData() ?? '';
+      if (body.includes('microseconds_add') && body.includes('timed out')) {
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      await route.continue();
+    });
+    const line = ['include', '0', '0', encodeURIComponent('timed out')].join('|');
+    await page.goto(
+      appUrl({ view: OBS, filter: filter('k8s_service_name', '=', 'proxy'), line, from: 'now-6h', to: 'now' })
+    );
+    const status = page.getByTestId('search-status');
+    await expect(status).toContainText('Searching the log text, newest first');
+    // the newest window's lines are shown while older windows are still being read
+    await expect(logsMain(page)).toContainText('upstream timed out', { timeout: 15_000 });
+    await expect(status).toContainText(/\d+ lines found/);
+    await page.screenshot({ path: `${SHOTS}/15-search-progress.png` });
+    await status.getByRole('button', { name: 'Stop' }).click();
+    await expect(status).toContainText('Search stopped');
+    await expect(logsMain(page)).toContainText('upstream timed out');
+  });
+
+  test('long text scans on the Patterns tab still ask first; Run anyway runs them', async ({ page }) => {
+    await page.goto(
+      appUrl({
+        view: OBS,
+        filter: filter('k8s_service_name', '!=', 'nothing'),
+        tab: 'patterns',
+        from: 'now-6h',
+        to: 'now',
+      })
+    );
     await expect(page.getByTestId('scan-guard')).toBeVisible();
-    await page.screenshot({ path: `${SHOTS}/09-scan-guard.png` });
     await page.getByRole('button', { name: 'Run anyway' }).click();
     await expect(page.getByTestId('scan-guard')).toHaveCount(0);
-    await expect(logsMain(page)).toContainText('upstream timed out');
+  });
+
+  test('the time range is limited to 24 hours: typed ranges, links and zoom out', async ({ page }) => {
+    await page.goto(appUrl({ view: OBS, from: 'now-7d', to: 'now' }));
+    await expect(page.getByText('Time range limited to 24 hours')).toBeVisible();
+    await expect(page.getByTestId('data-testid TimePicker Open Button')).toContainText('Last 24 hours');
+    await expect(page).toHaveURL(/from=now-24h/);
+    await page.screenshot({ path: `${SHOTS}/13-range-limited.png` });
+    // zoom out from 24 hours stays at 24 hours
+    await page.getByRole('button', { name: /Zoom out time range/ }).click();
+    await expect(page.getByTestId('data-testid TimePicker Open Button')).toContainText('Last 24 hours');
+    // an absolute range of 3 days keeps its end and is cut to its last 24 hours
+    const end = Date.now() - 3_600_000;
+    await page.goto(appUrl({ view: OBS, from: String(end - 3 * 86_400_000), to: String(end) }));
+    await expect(page.getByText('Time range limited to 24 hours')).toBeVisible();
+    await expect
+      .poll(() => {
+        const u = new URL(page.url());
+        const from = Date.parse(u.searchParams.get('from') ?? '') || Number(u.searchParams.get('from'));
+        const to = Date.parse(u.searchParams.get('to') ?? '') || Number(u.searchParams.get('to'));
+        return Math.round((to - from) / 3_600_000);
+      })
+      .toBe(24);
+  });
+
+  test('times are right although the StarRocks session is Asia/Kolkata; "Oldest log" shows the oldest line', async ({
+    page,
+  }) => {
+    await page.goto(appUrl({ view: OBS, filter: filter('k8s_service_name', '=', 'otel-collector') }));
+    const first = logsMain(page).locator('tr').first();
+    await expect(first).toContainText('ts=');
+    const text = (await first.textContent()) ?? '';
+    const shown = /\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}/.exec(text)?.[0];
+    const utcInMessage = /ts=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3})\d{3}Z/.exec(text)?.[1];
+    expect(shown && utcInMessage).toBeTruthy();
+    // the time shown (browser zone) is the time written in the line (UTC), not 5 h 30 min later
+    const diffMs = await page.evaluate(
+      ([s, u]) => new Date(s.replace(' ', 'T')).getTime() - Date.parse(u + 'Z'),
+      [shown!, utcInMessage!]
+    );
+    expect(diffMs).toBe(0);
+
+    const oldest = page.getByTestId('oldest-log');
+    await expect(oldest).toContainText('Oldest log');
+    await expect(oldest).toContainText(/\d{1,2} [A-Z][a-z]{2} \d{4} \d\d:\d\d/);
+    // the seed spans 4 hours: the oldest line is about 4 hours before the newest one
+    const hours = await oldest.evaluate((el, newest) => {
+      const m = /(\d{1,2} [A-Z][a-z]{2} \d{4} \d\d:\d\d)/.exec(el.textContent ?? '');
+      return m ? (new Date(newest.replace(' ', 'T')).getTime() - new Date(m[1]).getTime()) / 3_600_000 : NaN;
+    }, shown!);
+    expect(hours).toBeGreaterThan(3.8);
+    expect(hours).toBeLessThan(4.1);
+    await page.screenshot({ path: `${SHOTS}/14-oldest-log.png` });
+  });
+
+  test('a time range before the oldest log says so and offers the first hours of logs', async ({ page }) => {
+    const end = Date.now() - 10 * 86_400_000;
+    await page.goto(appUrl({ view: OBS, page: 'details', from: String(end - 3_600_000), to: String(end) }));
+    const notice = page.getByTestId('before-oldest');
+    await expect(notice).toContainText('No logs in this time range');
+    await page.screenshot({ path: `${SHOTS}/16-before-oldest.png` });
+    await notice.getByRole('button', { name: /Show the first 24 hours of logs/ }).click();
+    await expect(page.getByTestId('before-oldest')).toHaveCount(0);
+    await expect(logsMain(page).locator('tr').first()).toBeVisible();
   });
 
   test('state is in the URL: reload keeps filters, back returns to the service grid', async ({ page }) => {

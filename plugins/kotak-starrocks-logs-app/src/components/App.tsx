@@ -8,7 +8,6 @@ import {
   SceneAppPage,
   SceneReactObject,
   RuntimeDataSource,
-  SceneTimeRange,
   registerRuntimeDataSource,
   useSceneApp,
 } from '@grafana/scenes';
@@ -16,11 +15,13 @@ import {
 import { APP_TITLE, EXPLORE_ROUTE, PLUGIN_BASE_URL } from '../constants';
 import { AppJsonData, getAppConfig, setAppConfig } from '../config/config';
 import { ensureRuntimeDataSource } from '../datasource/StarRocksLogsDataSource';
+import { CappedTimeRange } from './CappedTimeRange';
 import { LogsExploration } from './LogsExploration';
 
 function getExploreScene(): EmbeddedScene {
   return new EmbeddedScene({
-    $timeRange: new SceneTimeRange({ from: getAppConfig().defaultTimeRange, to: 'now' }),
+    // at most maxRangeHours (24 h by default), however the range is chosen
+    $timeRange: new CappedTimeRange({ from: getAppConfig().defaultTimeRange, to: 'now' }),
     body: new LogsExploration(),
   });
 }

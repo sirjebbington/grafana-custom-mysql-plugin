@@ -1,6 +1,7 @@
 import { resolveConfig, resolveTenant } from '../config/config';
 import { emptySpec, QuerySpec } from '../state/types';
 import {
+  anyBeforeQuery,
   BuildContext,
   contextQuery,
   escapeRegex,
@@ -11,15 +12,20 @@ import {
   logsQuery,
   messageFieldRegex,
   needsMessageScan,
+  newestTimeTextQuery,
+  oldestInRangeQuery,
   patternsQuery,
   pickBucketSeconds,
+  planWindows,
   preciseTimeBounds,
+  queryHint,
   quoteIdent,
   serviceSamplesQuery,
   serviceVolumeQuery,
   volumeQuery,
   whereClause,
   widenToSeconds,
+  withQueryHint,
 } from './builder';
 
 const VIEW = 'vw_eks_app_logs_app_1961_observability';
@@ -280,5 +286,108 @@ describe('scan detection and buckets', () => {
     expect(pickBucketSeconds(3600 * 1000)).toBe(30);
     expect(pickBucketSeconds(24 * 3600 * 1000)).toBe(900);
     expect(pickBucketSeconds(7 * 24 * 3600 * 1000)).toBe(7200);
+  });
+});
+
+describe('query hint (session zone, query timeout)', () => {
+  const hint = queryHint({ timeZone: '+00:00', timeoutSeconds: 120 });
+
+  it('sets time_zone and query_timeout in one SET_VAR', () => {
+    expect(hint).toBe("/*+ SET_VAR(time_zone = '+00:00', query_timeout = 120) */");
+    expect(queryHint({ timeoutSeconds: 0 })).toBe('');
+    expect(queryHint({ timeoutSeconds: 60 })).toBe('/*+ SET_VAR(query_timeout = 60) */');
+    expect(queryHint({ timeZone: 'Asia/Kolkata', timeoutSeconds: 0 })).toBe(
+      "/*+ SET_VAR(time_zone = 'Asia/Kolkata') */"
+    );
+  });
+
+  it('goes after the first SELECT, also of a parenthesised UNION ALL; SHOW is unchanged', () => {
+    expect(withQueryHint('SELECT 1', hint)).toBe(`SELECT ${hint} 1`);
+    expect(withQueryHint('(SELECT a FROM t)\nUNION ALL\n(SELECT a FROM u)', hint)).toBe(
+      `(SELECT ${hint} a FROM t)\nUNION ALL\n(SELECT a FROM u)`
+    );
+    expect(withQueryHint("SHOW TABLES LIKE 'vw_%'", hint)).toBe("SHOW TABLES LIKE 'vw_%'");
+    expect(withQueryHint('SELECT 1', '')).toBe('SELECT 1');
+  });
+
+  it('has no $ (the data source would treat $name(...) as a macro)', () => {
+    expect(hint).not.toContain('$');
+  });
+});
+
+describe('line times are computed by StarRocks (epoch ms in the session zone)', () => {
+  it('line queries return __ms and the exact text, not the raw DATETIME', () => {
+    const sql = logsQuery(spec(), ctx(), 10, 'desc');
+    expect(sql).toContain(
+      "SELECT (UNIX_TIMESTAMP(`observed_timestamp`) * 1000 + MILLISECONDS_DIFF(`observed_timestamp`, DATE_TRUNC('second', `observed_timestamp`))) AS __ms, CAST(`observed_timestamp` AS VARCHAR) AS __ts"
+    );
+    expect(sql).toContain('ORDER BY `observed_timestamp` DESC');
+  });
+
+  it('the zone probe reads the newest line of the last day as text', () => {
+    expect(newestTimeTextQuery(VIEW)).toBe(
+      `SELECT CAST(\`observed_timestamp\` AS VARCHAR) AS t\nFROM \`${VIEW}\`\nWHERE \`observed_timestamp\` >= DATE_SUB(NOW(), INTERVAL 1 DAY)\nORDER BY \`observed_timestamp\` DESC\nLIMIT 1`
+    );
+  });
+});
+
+describe('planWindows (newest-first text search)', () => {
+  const H = 3_600_000;
+  const at = (h: number, m = 0) => Date.UTC(2026, 10, 24, h, m);
+
+  it('keeps a range of up to 2 hours as one window', () => {
+    expect(planWindows(at(12), at(14), 'desc')).toEqual([{ fromMs: at(12), toMs: at(14) }]);
+  });
+
+  it('desc: newest window first, doubling, inner boundaries on whole hours, no gap or overlap', () => {
+    const w = planWindows(at(2, 23), at(14, 23), 'desc');
+    expect(w).toEqual([
+      { fromMs: at(13), toMs: at(14, 23) },
+      { fromMs: at(11), toMs: at(13) - 1 },
+      { fromMs: at(7), toMs: at(11) - 1 },
+      { fromMs: at(2, 23), toMs: at(7) - 1 },
+    ]);
+  });
+
+  it('asc: oldest window first', () => {
+    const w = planWindows(at(2, 23), at(14, 23), 'asc');
+    expect(w[0]).toEqual({ fromMs: at(2, 23), toMs: at(4) - 1 });
+    expect(w[w.length - 1].toMs).toBe(at(14, 23));
+  });
+
+  it('covers 24 hours in at most 5 windows, contiguous', () => {
+    for (const sort of ['desc', 'asc'] as const) {
+      const from = at(0, 7) - 24 * H + 7;
+      const to = at(0, 7) + 123;
+      const w = planWindows(from, to, sort);
+      expect(w.length).toBeLessThanOrEqual(5);
+      const ordered = sort === 'desc' ? [...w].reverse() : w;
+      expect(ordered[0].fromMs).toBe(from);
+      expect(ordered[ordered.length - 1].toMs).toBe(to);
+      for (let i = 1; i < ordered.length; i++) {
+        expect(ordered[i].fromMs).toBe(ordered[i - 1].toMs + 1);
+      }
+    }
+  });
+
+  it('window bounds give exact SQL bounds that meet: ts < boundary, then ts >= boundary', () => {
+    const [newest, next] = planWindows(at(2, 23), at(14, 23), 'desc');
+    expect(preciseTimeBounds(next.fromMs, next.toMs)[1]).toBe(
+      preciseTimeBounds(newest.fromMs, newest.toMs)[0].replace('>=', '<')
+    );
+  });
+});
+
+describe('oldest line queries', () => {
+  it('asks for one line older than a time (LIMIT 1)', () => {
+    expect(anyBeforeQuery(VIEW, 1_700_000_000_999)).toBe(
+      `SELECT 1 AS x FROM \`${VIEW}\` WHERE \`observed_timestamp\` < FROM_UNIXTIME(1700000000) LIMIT 1`
+    );
+  });
+
+  it('takes MIN over a short range only', () => {
+    const sql = oldestInRangeQuery(VIEW, 1_700_000_000_000, 1_700_003_600_000);
+    expect(sql).toContain('UNIX_TIMESTAMP(MIN(`observed_timestamp`)) * 1000');
+    expect(sql).toContain('>= FROM_UNIXTIME(1700000000) AND `observed_timestamp` < FROM_UNIXTIME(1700003600)');
   });
 });

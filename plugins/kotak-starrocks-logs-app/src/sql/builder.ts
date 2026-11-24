@@ -67,6 +67,15 @@ export function escapeRegex(text: string): string {
 const T = quoteIdent(TIME_COLUMN);
 const M = quoteIdent(MESSAGE_COLUMN);
 
+/**
+ * Epoch milliseconds of a DATETIME expression, computed by StarRocks in the session zone. The data source
+ * would read a DATETIME as UTC, which is wrong whenever the session zone is not UTC. (StarRocks has no
+ * MICROSECOND(); the milliseconds within the second come from MILLISECONDS_DIFF.)
+ */
+export function timeMsExpr(expr: string): string {
+  return `(UNIX_TIMESTAMP(${expr}) * 1000 + MILLISECONDS_DIFF(${expr}, DATE_TRUNC('second', ${expr})))`;
+}
+
 export function timeFilter(): string {
   return `$__timeFilter(${T})`;
 }
@@ -83,6 +92,83 @@ export function preciseTimeBounds(fromMs: number, toMs: number): string[] {
     return `microseconds_add(FROM_UNIXTIME(${s}), ${(ms - s * 1000) * 1000})`;
   };
   return [`${T} >= ${at(Math.floor(fromMs))}`, `${T} < ${at(Math.floor(toMs) + 1)}`];
+}
+
+/**
+ * Query-scope SET_VAR hint added to every statement the app sends:
+ * - time_zone: the zone the time column's wall clock is in (see sql/timeZone.ts), so that FROM_UNIXTIME and
+ *   UNIX_TIMESTAMP agree with the column. Left out when unknown: the data source's session zone applies.
+ * - query_timeout: a backstop. StarRocks also stops a query when its connection closes, which is what
+ *   happens when Grafana cancels a request (a newer selection, leaving the page, the panel's cancel).
+ */
+export function queryHint(opts: { timeZone?: string; timeoutSeconds: number }): string {
+  const vars: string[] = [];
+  if (opts.timeZone) {
+    vars.push(`time_zone = ${lit(opts.timeZone)}`);
+  }
+  if (opts.timeoutSeconds > 0) {
+    vars.push(`query_timeout = ${Math.floor(opts.timeoutSeconds)}`);
+  }
+  return vars.length > 0 ? `/*+ SET_VAR(${vars.join(', ')}) */` : '';
+}
+
+/**
+ * Puts the hint after the statement's first SELECT. StarRocks applies a query-scope hint found anywhere in
+ * the statement to all of it (UNION ALL included). SHOW statements are returned unchanged.
+ */
+export function withQueryHint(sql: string, hint: string): string {
+  if (hint === '') {
+    return sql;
+  }
+  return sql.replace(/^(\s*\(?\s*SELECT)\b/i, (m) => `${m} ${hint}`);
+}
+
+const HOUR_MS = 3_600_000;
+
+/** Inclusive millisecond bounds of one search window (as for preciseTimeBounds). */
+export interface TimeWindow {
+  fromMs: number;
+  toMs: number;
+}
+
+/**
+ * Splits a range into windows searched one after another for the newest (desc) or oldest (asc) lines, so a
+ * text search stops as soon as it has enough lines instead of reading the whole range. The first window is
+ * about firstMs long and each next one is twice as long; inner boundaries fall on whole hours, so each
+ * hourly Iceberg partition is read by one window only. Windows do not overlap and leave no gap.
+ */
+export function planWindows(fromMs: number, toMs: number, sort: 'desc' | 'asc', firstMs = HOUR_MS): TimeWindow[] {
+  const from = Math.floor(fromMs);
+  const end = Math.floor(toMs) + 1; // exclusive
+  if (end - 1 - from <= 2 * firstMs) {
+    return [{ fromMs: from, toMs: end - 1 }];
+  }
+  const out: TimeWindow[] = [];
+  let size = firstMs;
+  if (sort === 'desc') {
+    let hi = end;
+    while (hi > from) {
+      let lo = Math.floor((hi - size) / HOUR_MS) * HOUR_MS;
+      if (lo - from < HOUR_MS) {
+        lo = from; // no window shorter than an hour at the far end
+      }
+      out.push({ fromMs: lo, toMs: hi - 1 });
+      hi = lo;
+      size *= 2;
+    }
+  } else {
+    let lo = from;
+    while (lo < end) {
+      let hi = Math.ceil((lo + size) / HOUR_MS) * HOUR_MS;
+      if (end - hi < HOUR_MS) {
+        hi = end;
+      }
+      out.push({ fromMs: lo, toMs: hi - 1 });
+      lo = hi;
+      size *= 2;
+    }
+  }
+  return out;
 }
 
 /** Time range to send with a line query so that $__timeFilter covers the exact bounds (whole seconds). */
@@ -235,7 +321,7 @@ export function lineColumns(ctx: BuildContext): string[] {
 
 function lineSelect(ctx: BuildContext): string {
   return [
-    T,
+    `${timeMsExpr(T)} AS __ms`,
     `CAST(${T} AS VARCHAR) AS __ts`,
     M,
     `${levelExpr(ctx.tenant)} AS detected_level`,
@@ -390,6 +476,40 @@ export function patternsQuery(spec: QuerySpec, ctx: BuildContext, bucket: number
     `WHERE ${whereClause(spec, ctx, { skipPatterns: true })}`,
     `GROUP BY t, p`,
     `ORDER BY t`,
+  ].join('\n');
+}
+
+/**
+ * The newest line's time as text, in the last day (TopN with LIMIT 1). Run with two session zones to tell an
+ * instant-like column from a wall-clock one (sql/timeZone.ts).
+ */
+export function newestTimeTextQuery(view: string): string {
+  return [
+    `SELECT CAST(${T} AS VARCHAR) AS t`,
+    from(view),
+    `WHERE ${T} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`,
+    `ORDER BY ${T} DESC`,
+    `LIMIT 1`,
+  ].join('\n');
+}
+
+/** The data source's own session zone and its offset from UTC in minutes (run without a time_zone hint). */
+export function sessionZoneQuery(): string {
+  return 'SELECT @@time_zone AS tz, TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW()) AS off';
+}
+
+/** Is there any line older than beforeMs? LIMIT 1: StarRocks stops at the first row it finds. */
+export function anyBeforeQuery(view: string, beforeMs: number): string {
+  return `SELECT 1 AS x ${from(view)} WHERE ${T} < FROM_UNIXTIME(${Math.floor(beforeMs / 1000)}) LIMIT 1`;
+}
+
+/** Oldest line in a short range (the hour found by the search in findOldest), as epoch ms. */
+export function oldestInRangeQuery(view: string, fromMs: number, toMs: number): string {
+  const s = (ms: number) => Math.floor(ms / 1000);
+  return [
+    `SELECT ${timeMsExpr(`MIN(${T})`)} AS oldest`,
+    from(view),
+    `WHERE ${T} >= FROM_UNIXTIME(${s(fromMs)}) AND ${T} < FROM_UNIXTIME(${s(toMs)})`,
   ].join('\n');
 }
 

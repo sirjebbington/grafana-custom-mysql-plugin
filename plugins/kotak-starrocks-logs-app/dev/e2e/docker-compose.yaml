@@ -1,12 +1,13 @@
 # Local end-to-end environment for kotak-starrocks-logs-app: Grafana 12.0.1-security-01 with the app and the
-# (unchanged) kotak-starrocks-datasource, a mock OIDC provider standing in for IDAM, and StarRocks 4.0.10 with
-# an eks_app_logs-shaped table, per-tenant views and native JWT users with per-view grants.
+# (unchanged) kotak-starrocks-datasource, a mock OIDC provider standing in for IDAM, and StarRocks (4.1.6, the
+# UAT version; STARROCKS_IMAGE overrides it) with an eks_app_logs-shaped table, per-tenant views and native JWT
+# users with per-view grants. docker-compose.iceberg.yaml adds a real Iceberg table (scripts/e2e.sh iceberg).
 # Driven by scripts/e2e.sh. Ports differ from the datasource repo's e2e stack so both can run.
 name: kotak-starrocks-logs-e2e
 
 services:
   starrocks:
-    image: starrocks/allin1-ubuntu:4.0.10
+    image: ${STARROCKS_IMAGE:-starrocks/allin1-ubuntu:4.1.6}
     ports:
       - "29030:9030"
 

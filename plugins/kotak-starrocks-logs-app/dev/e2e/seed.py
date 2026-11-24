@@ -7,8 +7,16 @@ granted SELECT on some views (stands in for Ranger).
   python3 dev/e2e/seed.py [hours] | mysql -h127.0.0.1 -P29030 -uroot
 
 Timestamps are relative to now (UTC, microseconds), so re-run it before testing on another day.
+
+Like UAT, the StarRocks session time zone is not UTC (FE_TIME_ZONE, default Asia/Kolkata). VIEW_TIME sets how
+the views show observed_timestamp (the table holds UTC):
+  session  (default) in the session time zone, the way StarRocks shows an Iceberg timestamptz column
+  ist      as IST wall-clock time whatever the session (a timestamp column written in local time)
+  utc      as UTC wall-clock time whatever the session (a timestamp column written in UTC)
+The app detects which one it is and picks the session zone of its statements (src/sql/timeZone.ts).
 """
 import datetime as dt
+import os
 import random
 import sys
 
@@ -217,8 +225,26 @@ def rows_for(app_id, spec):
     return out
 
 
+FE_TIME_ZONE = os.environ.get("FE_TIME_ZONE", "Asia/Kolkata")
+VIEW_TIME = os.environ.get("VIEW_TIME", "session")
+VIEW_TIME_EXPR = {
+    "session": "CONVERT_TZ(observed_timestamp, '+00:00', @@time_zone)",
+    "ist": "CONVERT_TZ(observed_timestamp, '+00:00', '+05:30')",
+    "utc": None,
+}
+
+
+def view_select():
+    """SELECT list of a tenant view, with observed_timestamp shown as VIEW_TIME says."""
+    expr = VIEW_TIME_EXPR[VIEW_TIME]
+    if expr is None:
+        return "*"
+    return ", ".join(f"{expr} AS observed_timestamp" if c == "observed_timestamp" else c for c in COLUMNS)
+
+
 def main():
     w = sys.stdout.write
+    w(f"SET GLOBAL time_zone = {q(FE_TIME_ZONE)};\n")
     cols = ",\n  ".join(
         f"{c} DATETIME" if c == "observed_timestamp" else (f"{c} VARCHAR(65533)" if c == "message" else f"{c} VARCHAR(512)")
         for c in COLUMNS
@@ -233,7 +259,7 @@ def main():
                 batch = rows[i:i + 2000]
                 w("INSERT INTO eks_app_logs VALUES\n" + ",\n".join("(" + ", ".join(q(v) for v in r) + ")" for r in batch) + ";\n")
             w(f"DROP VIEW IF EXISTS vw_eks_app_logs_{app_id};\n")
-            w(f"CREATE VIEW vw_eks_app_logs_{app_id} AS SELECT * FROM eks_app_logs WHERE app_id = {q(app_id)};\n")
+            w(f"CREATE VIEW vw_eks_app_logs_{app_id} AS SELECT {view_select()} FROM eks_app_logs WHERE app_id = {q(app_id)};\n")
     for user, views in GRANTS.items():
         w(f"DROP USER IF EXISTS '{user}'@'%';\n")
         w(f"CREATE USER '{user}'@'%' IDENTIFIED WITH authentication_jwt AS {q(JWT)};\n")

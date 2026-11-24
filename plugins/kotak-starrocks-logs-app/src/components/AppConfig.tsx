@@ -13,6 +13,7 @@ const EXAMPLE: AppJsonData = {
   datasourceUid: 'app-logs-starrocks-db',
   datasources: ['app-logs-starrocks-db', { uid: 'app-logs-starrocks-db2', viewPrefix: 'vw_eks_app_logs_' }],
   viewPrefix: 'vw_eks_app_logs_',
+  maxRangeHours: 24,
   maxScanHours: 6,
   tenants: {
     default: { level: { source: 'column' } },
@@ -96,7 +97,7 @@ export function AppConfig({ plugin }: PluginConfigPageProps<AppPluginMeta<AppJso
       )}
       <Field
         label="jsonData"
-        description="Keys: datasourceUid, datasources, viewPrefix, serviceLabel, defaultTimeRange, maxScanHours, lineLimit, labels, fields, tenants (app_id or <datasourceUid>/<app_id>)"
+        description="Keys: datasourceUid, datasources, viewPrefix, serviceLabel, defaultTimeRange, maxRangeHours, maxScanHours, lineLimit, queryTimeoutSeconds, timeZone, labels, fields, tenants (app_id or <datasourceUid>/<app_id>)"
       >
         <TextArea rows={24} value={text} onChange={(e) => setText(e.currentTarget.value)} className={styles.mono} />
       </Field>

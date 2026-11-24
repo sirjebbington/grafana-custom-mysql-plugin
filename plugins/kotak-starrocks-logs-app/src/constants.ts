@@ -1,8 +1,8 @@
 export const PLUGIN_ID = 'kotak-starrocks-logs-app';
 export const APP_TITLE = 'Logs Drilldown (StarRocks)';
 
-// Time picker quick ranges: up to 24 hours (longer ranges scan a lot of data on the shared cluster; an
-// absolute range can still be typed, and the scan guard applies).
+// Time picker quick ranges: up to 24 hours, the default maxRangeHours (a longer typed range is cut to it).
+// Ranges longer than a configured maxRangeHours are not offered.
 export const QUICK_RANGES = [
   { from: 'now-5m', to: 'now', display: 'Last 5 minutes' },
   { from: 'now-15m', to: 'now', display: 'Last 15 minutes' },

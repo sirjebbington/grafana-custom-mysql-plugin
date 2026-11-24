@@ -1,0 +1,38 @@
+# Real Iceberg tables for the e2e stack (scripts/e2e.sh iceberg): an S3 store (SeaweedFS), an Iceberg REST
+# catalog, and a PyIceberg writer. Used with docker-compose.yaml (same project and network); StarRocks reads
+# the tables through an external catalog, like the UAT Glue catalog. Relative paths are relative to
+# dev/e2e (the directory of the first compose file).
+services:
+  s3:
+    image: chrislusf/seaweedfs:3.85
+    command: server -s3 -s3.config=/etc/seaweedfs/s3.json -dir=/data -volume.max=0 -master.volumeSizeLimitMB=256
+    volumes:
+      - ./iceberg/s3.json:/etc/seaweedfs/s3.json:ro
+
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.9.1
+    depends_on:
+      - s3
+    environment:
+      AWS_ACCESS_KEY_ID: e2e
+      AWS_SECRET_ACCESS_KEY: e2e-secret
+      AWS_REGION: us-east-1
+      # a file, not the default in-memory SQLite (its connections are recycled and the tables vanish)
+      CATALOG_URI: jdbc:sqlite:/tmp/iceberg_catalog.db
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://s3:8333
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+
+  iceberg-writer:
+    image: python:3.12-slim
+    profiles: ["tools"]
+    depends_on:
+      - iceberg-rest
+    working_dir: /work
+    volumes:
+      - .:/work:ro
+    environment:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    command: >
+      sh -c "pip install -q 'pyiceberg[pyarrow]==0.9.1' && python /work/iceberg/write_iceberg.py"

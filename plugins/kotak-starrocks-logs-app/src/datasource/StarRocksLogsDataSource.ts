@@ -1,4 +1,4 @@
-import { Observable, catchError, forkJoin, from, lastValueFrom, map, of, switchMap } from 'rxjs';
+import { Observable, Subscription, catchError, combineLatest, from, lastValueFrom, map, of, switchMap } from 'rxjs';
 
 import {
   DataFrame,
@@ -33,17 +33,22 @@ import {
   fieldBreakdownQuery,
   labelOverviewQuery,
   logsQuery,
+  needsMessageScan,
   patternsQuery,
   pickBucketSeconds,
+  planWindows,
   serviceSamplesQuery,
   serviceVolumeQuery,
+  TimeWindow,
   valueBreakdownQuery,
   volumeQuery,
   widenToSeconds,
 } from '../sql/builder';
 import { QueryKind, QueryParams, QuerySpec } from '../state/types';
 import { fetchColumns, runSql } from './api';
+import { ensureSessionZone } from './timeZone';
 import {
+  concatFrames,
   groupValuesOf,
   toLabelOverviewFrames,
   toLevelFrames,
@@ -58,6 +63,24 @@ export interface LogsAppQuery extends DataQuery {
   kind: QueryKind;
   spec: QuerySpec;
   params?: QueryParams;
+}
+
+/** Progress of a windowed text search, in meta.custom.search of the lines frame. */
+export interface SearchProgress {
+  /** part of the time range searched so far (ms) */
+  searchedFromMs: number;
+  searchedToMs: number;
+  rangeFromMs: number;
+  rangeToMs: number;
+  windows: number;
+  totalWindows: number;
+  lines: number;
+  limit: number;
+  done: boolean;
+}
+
+export function searchProgressOf(frame?: DataFrame): SearchProgress | undefined {
+  return frame?.meta?.custom?.search as SearchProgress | undefined;
 }
 
 const ALL_COLUMNS = [
@@ -76,6 +99,8 @@ export async function buildContext(view: string, range: TimeRange, datasource = 
   if (columns.length === 0) {
     columns = ALL_COLUMNS;
   }
+  // before the view's first data query: the session zone its statements run in
+  await ensureSessionZone(view, datasource);
   return {
     tenant: resolveTenant(config, view, datasource || config.datasource.uid),
     columns,
@@ -150,18 +175,127 @@ function errorResponse(refId: string, err: unknown): DataQueryResponse {
 }
 
 function widenedRange(range: TimeRange): TimeRange {
-  const w = widenToSeconds(range.from.valueOf(), range.to.valueOf());
+  return widenedWindow({ fromMs: range.from.valueOf(), toMs: range.to.valueOf() });
+}
+
+function widenedWindow(win: TimeWindow): TimeRange {
+  const w = widenToSeconds(win.fromMs, win.toMs);
   return { from: dateTime(w.fromMs), to: dateTime(w.toMs), raw: { from: dateTime(w.fromMs), to: dateTime(w.toMs) } };
+}
+
+/**
+ * Lines with a text filter (line search, message field, pattern, level from the message): StarRocks has to
+ * read the message of every row in the range, and ORDER BY ... LIMIT does not stop early. So the range is
+ * searched in windows, newest first (oldest first for ascending order): 1 hour, then 2, 4, 8 hours...
+ * The search stops when it has the line limit. After each window the lines found so far are sent to the
+ * panel (Streaming), so they appear while older windows are read. Unsubscribing (a newer query, leaving the
+ * page, the panel's cancel button) cancels the running window and starts no more.
+ */
+function runWindowedLines(
+  q: LogsAppQuery,
+  ctx: BuildContext,
+  range: TimeRange,
+  windows: TimeWindow[],
+  requestId?: string
+): Observable<DataQueryResponse> {
+  const p = q.params ?? {};
+  const limit = p.limit ?? getAppConfig().lineLimit;
+  const sort = p.sort ?? 'desc';
+  return new Observable<DataQueryResponse>((subscriber) => {
+    let current: Subscription | undefined;
+    const found: DataFrame[] = [];
+    const sqls: string[] = [];
+    let lines = 0;
+    let empty: DataFrame | undefined;
+
+    const step = (i: number) => {
+      const w = windows[i];
+      const sql = logsQuery(q.spec, ctx, limit - lines, sort, w);
+      sqls.push(sql);
+      current = runSql(sql, {
+        datasource: q.spec.datasource,
+        view: q.spec.view,
+        refId: q.refId,
+        range: widenedWindow(w),
+        requestId: requestId ? `${requestId}_w${i}` : undefined,
+      }).subscribe({
+        next: (res) => {
+          const err = res.errors?.[0] ?? res.error;
+          if (err) {
+            subscriber.next({ data: [], errors: [{ ...err, refId: q.refId }], error: err, state: LoadingState.Error });
+            subscriber.complete();
+            return;
+          }
+          const frame = (res.data as DataFrame[])[0];
+          if (frame && frame.length > 0) {
+            found.push(frame);
+            lines += frame.length;
+          } else if (frame) {
+            empty = frame;
+          }
+          const done = lines >= limit || i === windows.length - 1;
+          const progress: SearchProgress = {
+            searchedFromMs: sort === 'desc' ? w.fromMs : windows[0].fromMs,
+            searchedToMs: sort === 'desc' ? windows[0].toMs : w.toMs,
+            rangeFromMs: range.from.valueOf(),
+            rangeToMs: range.to.valueOf(),
+            windows: i + 1,
+            totalWindows: windows.length,
+            lines,
+            limit,
+            done,
+          };
+          const source = found.length > 0 ? concatFrames(found) : empty;
+          const frames = source ? transform(q, ctx, [source], range) : [];
+          frames.forEach(
+            (f) =>
+              (f.meta = {
+                ...f.meta,
+                executedQueryString: sqls.join(';\n\n'),
+                custom: { ...f.meta?.custom, search: progress },
+              })
+          );
+          // Loading until the first lines arrive: the Logs panel keeps showing the previous result meanwhile
+          const state = done ? LoadingState.Done : lines > 0 ? LoadingState.Streaming : LoadingState.Loading;
+          subscriber.next({ data: frames, state, key: q.refId });
+          if (done) {
+            subscriber.complete();
+          } else {
+            step(i + 1);
+          }
+        },
+        error: (e) => {
+          subscriber.next(errorResponse(q.refId, e));
+          subscriber.complete();
+        },
+      });
+    };
+
+    step(0);
+    return () => current?.unsubscribe();
+  });
 }
 
 /** Runs one structured query and returns frames ready for the panels. */
 export function runLogsQuery(q: LogsAppQuery, range: TimeRange, requestId?: string): Observable<DataQueryResponse> {
   return from(buildContext(q.spec.view, range, q.spec.datasource)).pipe(
     switchMap((ctx) => {
+      if ((q.kind === 'logs' || q.kind === 'table') && needsMessageScan(q.spec, ctx.tenant, false)) {
+        const windows = planWindows(range.from.valueOf(), range.to.valueOf(), q.params?.sort ?? 'desc');
+        if (windows.length > 1) {
+          return runWindowedLines(q, ctx, range, windows, requestId);
+        }
+      }
       const sql = buildSql(q, ctx, range);
       // line queries have exact bounds in the SQL; widen the range for $__timeFilter to whole seconds
       const sqlRange = q.kind === 'logs' || q.kind === 'table' ? widenedRange(range) : range;
-      return runSql(sql, { datasource: q.spec.datasource, refId: q.refId, range: sqlRange, requestId }).pipe(
+      return runSql(sql, {
+        datasource: q.spec.datasource,
+        view: q.spec.view,
+        refId: q.refId,
+        range: sqlRange,
+        requestId,
+      }).pipe(
         map((res): DataQueryResponse => {
           const err = res.errors?.[0] ?? res.error;
           if (err) {
@@ -191,14 +325,26 @@ export class StarRocksLogsDataSource extends RuntimeDataSource<LogsAppQuery> {
     if (targets.length === 0) {
       return of({ data: [], state: LoadingState.Done });
     }
-    return forkJoin(targets.map((t) => runLogsQuery(t, request.range, `${request.requestId ?? 'q'}_${t.refId}`))).pipe(
+    // combineLatest, not forkJoin: a windowed text search sends its lines window by window
+    return combineLatest(
+      targets.map((t) => runLogsQuery(t, request.range, `${request.requestId ?? 'q'}_${t.refId}`))
+    ).pipe(
       map((responses) => {
         const errors = responses.flatMap((r) => r.errors ?? []);
+        const states = responses.map((r) => r.state ?? LoadingState.Done);
+        const state =
+          errors.length > 0
+            ? LoadingState.Error
+            : states.includes(LoadingState.Loading)
+              ? LoadingState.Loading
+              : states.includes(LoadingState.Streaming)
+                ? LoadingState.Streaming
+                : LoadingState.Done;
         return {
           data: responses.flatMap((r) => r.data),
           errors: errors.length > 0 ? errors : undefined,
           error: errors[0],
-          state: errors.length > 0 ? LoadingState.Error : LoadingState.Done,
+          state,
         };
       })
     );
@@ -235,7 +381,7 @@ export class StarRocksLogsDataSource extends RuntimeDataSource<LogsAppQuery> {
     const datasource = query?.spec?.datasource ?? '';
     const ctx = await buildContext(view, range, datasource);
     const sql = contextQuery(view, ctx, podColumn, pod, tsRaw, direction, options?.limit ?? 50);
-    const res = await lastValueFrom(runSql(sql, { datasource, refId: `context-${direction}`, range }));
+    const res = await lastValueFrom(runSql(sql, { datasource, view, refId: `context-${direction}`, range }));
     const err = res.errors?.[0] ?? res.error;
     if (err) {
       throw new Error(err.message);

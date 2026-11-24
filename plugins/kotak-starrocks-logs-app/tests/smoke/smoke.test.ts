@@ -5,26 +5,28 @@
  */
 import { resolveConfig, resolveTenant, AppJsonData } from '../../src/config/config';
 import {
+  anyBeforeQuery,
   BuildContext,
   contextQuery,
   fieldBreakdownQuery,
   labelOverviewQuery,
   logsQuery,
+  oldestInRangeQuery,
   patternsQuery,
+  planWindows,
   serviceSamplesQuery,
+  timeMsExpr,
   serviceVolumeQuery,
   valueBreakdownQuery,
   viewsQuery,
   volumeQuery,
   widenToSeconds,
 } from '../../src/sql/builder';
+import { findOldest } from '../../src/datasource/oldestSearch';
+import { appHint, detectMode, DS, DS2, Session, setDefaultHint } from './helpers';
 import { DEFAULT_FIELDS, DEFAULT_LABELS } from '../../src/constants';
 import { emptySpec, QuerySpec } from '../../src/state/types';
 
-const GRAFANA = process.env.GRAFANA_URL ?? 'http://localhost:23000';
-const DS = { uid: 'e2e-ds-starrocks-logs', type: 'kotak-starrocks-datasource' };
-// second StarRocks database = second instance of the data source plugin
-const DS2 = { uid: 'e2e-ds-starrocks-logs2', type: 'kotak-starrocks-datasource' };
 const PAYMENTS = 'vw_eks_app_logs_app_04000_payments';
 const OBS = 'vw_eks_app_logs_app_1961_observability';
 const CMM = 'vw_eks_app_logs_app_01996_frontlineplatforms_cmm';
@@ -48,66 +50,6 @@ const JSON_DATA: AppJsonData = {
     'e2e-ds-starrocks-logs2/app_1961_observability': { level: { source: 'column' } },
   },
 };
-
-class Session {
-  private cookies = new Map<string, string>();
-  constructor(readonly user: string) {}
-
-  private header() {
-    return Array.from(this.cookies.entries())
-      .map(([k, v]) => `${k}=${v}`)
-      .join('; ');
-  }
-
-  private store(res: Response) {
-    for (const c of res.headers.getSetCookie()) {
-      const [kv] = c.split(';');
-      const i = kv.indexOf('=');
-      this.cookies.set(kv.slice(0, i), kv.slice(i + 1));
-    }
-  }
-
-  async login() {
-    let res = await fetch(`${GRAFANA}/login/generic_oauth`, { redirect: 'manual' });
-    this.store(res);
-    const authorize = res.headers.get('location')!;
-    // the mock IDAM puts these claims into the ID and access tokens
-    const claims = { aud: ['grafana-e2e'], email: `${this.user}@kotak.com` };
-    const form = new URLSearchParams({ username: this.user, claims: JSON.stringify(claims) });
-    res = await fetch(authorize, { method: 'POST', body: form, redirect: 'manual' });
-    const callback = res.headers.get('location')!;
-    res = await fetch(callback, { headers: { cookie: this.header() }, redirect: 'manual' });
-    this.store(res);
-    const me = await (await fetch(`${GRAFANA}/api/user`, { headers: { cookie: this.header() } })).json();
-    expect(me.login).toBe(this.user);
-  }
-
-  /** Runs SQL as this user; returns rows as objects, or throws with the datasource error. */
-  async sql(rawSql: string, from = 'now-6h', to = 'now', ds = DS): Promise<Array<Record<string, unknown>>> {
-    const res = await fetch(`${GRAFANA}/api/ds/query`, {
-      method: 'POST',
-      headers: { cookie: this.header(), 'content-type': 'application/json' },
-      body: JSON.stringify({
-        from,
-        to,
-        queries: [{ refId: 'A', datasource: ds, rawSql, format: 'table', rawQuery: true }],
-      }),
-    });
-    const body = await res.json();
-    const r = body.results?.A;
-    if (!r || r.error) {
-      throw new Error(r?.error ?? JSON.stringify(body));
-    }
-    const frame = r.frames?.[0];
-    if (!frame) {
-      return [];
-    }
-    const names: string[] = frame.schema.fields.map((f: { name: string }) => f.name);
-    const cols: unknown[][] = frame.data?.values ?? [];
-    const n = cols[0]?.length ?? 0;
-    return Array.from({ length: n }, (_, i) => Object.fromEntries(names.map((name, j) => [name, cols[j][i]])));
-  }
-}
 
 const COLUMNS = [
   'observed_timestamp',
@@ -134,9 +76,15 @@ function spec(view: string, p: Partial<QuerySpec> = {}, ds = DS): QuerySpec {
 }
 
 const e2e = new Session('kmbl3e2e');
+// what the seed's views are like (seed.py VIEW_TIME / FE_TIME_ZONE)
+const VIEW_TIME = process.env.VIEW_TIME ?? 'session';
+const FE_TIME_ZONE = process.env.FE_TIME_ZONE ?? 'Asia/Kolkata';
 
 beforeAll(async () => {
   await e2e.login();
+  // like the app: detect each database's time column kind, then send that hint with every statement
+  setDefaultHint(DS, appHint(await detectMode(e2e, OBS, DS)));
+  setDefaultHint(DS2, appHint(await detectMode(e2e, OBS, DS2)));
 });
 
 describe('per-user access (StarRocks grants stand in for Ranger)', () => {
@@ -188,7 +136,7 @@ describe('every query kind runs on StarRocks (observability view, level from mes
     const rows = await e2e.sql(logsQuery(spec(OBS), c, 50, 'desc'));
     expect(rows).toHaveLength(50);
     expect(String(rows[0].__ts)).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{6}$/);
-    expect(Number(rows[0].observed_timestamp)).toBeGreaterThanOrEqual(Number(rows[49].observed_timestamp));
+    expect(Number(rows[0].__ms)).toBeGreaterThanOrEqual(Number(rows[49].__ms));
     expect(rows[0]).toHaveProperty('k8s_pod_uid');
   });
 
@@ -203,17 +151,17 @@ describe('every query kind runs on StarRocks (observability view, level from mes
     const key = (r: Record<string, unknown>) => `${r.__ts}|${r.k8s_pod_uid}|${r.message}`;
     const p1 = await page(toMs, 1000);
     expect(p1).toHaveLength(1000);
-    const oldest1 = Number(p1[999].observed_timestamp);
+    const oldest1 = Number(p1[999].__ms);
     const p2 = await page(oldest1, 1000);
     expect(p2).toHaveLength(1000);
     // page 2 starts within the last millisecond of page 1 (the overlap is removed by line id)
-    expect(Number(p2[0].observed_timestamp)).toBeLessThanOrEqual(oldest1 + 1);
+    expect(Number(p2[0].__ms)).toBeLessThanOrEqual(oldest1 + 1);
     const merged = new Map([...p1, ...p2].map((r) => [key(r), r]));
     expect(merged.size).toBeGreaterThan(1500);
     // no gap: every line of one 2500-line query down to page 2's oldest millisecond is in the two pages
-    const oldest2 = Number(p2[999].observed_timestamp);
+    const oldest2 = Number(p2[999].__ms);
     const all = await page(toMs, 2500);
-    const expected = all.filter((r) => Number(r.observed_timestamp) > oldest2);
+    const expected = all.filter((r) => Number(r.__ms) > oldest2);
     expect(expected.length).toBeGreaterThan(1500);
     expect(expected.filter((r) => !merged.has(key(r)))).toEqual([]);
   });
@@ -345,6 +293,153 @@ describe('every query kind runs on StarRocks (observability view, level from mes
     back.forEach((r) => expect(r.k8s_pod_uid).toBe(line.k8s_pod_uid));
     expect(String(back[0].__ts) < String(line.__ts)).toBe(true);
   });
+});
+
+describe(`time zone: session ${FE_TIME_ZONE}, views show the time column as "${VIEW_TIME}"`, () => {
+  const c = ctx(OBS);
+  // otel-collector lines carry their UTC time in the message (ts=...Z), like the UAT screenshots
+  const otel = spec(OBS, { filters: [{ key: 'k8s_service_name', op: '=', value: 'otel-collector' }] });
+  const inMessage = (r: Record<string, unknown>) => Date.parse(/ts=(\S+?)\d{3}Z/.exec(String(r.message))![1] + 'Z');
+  const sessionOffsetMin = FE_TIME_ZONE === 'Asia/Kolkata' ? 330 : 0;
+
+  it('the session zone is the FE default', async () => {
+    const [tz] = await e2e.sql('SELECT @@time_zone AS tz', 'now-6h', 'now', DS, { hint: '' });
+    expect(tz.tz).toBe(FE_TIME_ZONE);
+  });
+
+  it('the probe tells the kind of time column: instant (timestamptz) or wall clock in IST or UTC', async () => {
+    const mode = await detectMode(e2e, OBS, DS);
+    const expected = {
+      session: { kind: 'aware' },
+      ist: { kind: 'naive', offsetMinutes: 330 },
+      utc: { kind: 'naive', offsetMinutes: 0 },
+    };
+    expect(mode).toEqual(expected[VIEW_TIME as keyof typeof expected]);
+  });
+
+  it('with the app hint, every line time (__ms) is the time written in the message, and __ts is the same instant', async () => {
+    const rows = await e2e.sql(logsQuery(otel, c, 200, 'desc'), 'now-12h', 'now+12h');
+    expect(rows.length).toBe(200);
+    rows.forEach((r) => expect(Number(r.__ms)).toBe(inMessage(r)));
+  });
+
+  it('the time filter (FROM_UNIXTIME in the same zone) selects lines by their real time', async () => {
+    const [newest] = await e2e.sql(logsQuery(otel, c, 1, 'desc'), 'now-12h', 'now+12h');
+    const to = Number(newest.__ms) + 1000;
+    const from = to - 15 * 60_000;
+    const rows = await e2e.sql(logsQuery(otel, c, 5000, 'desc'), String(from), String(to));
+    expect(rows.length).toBeGreaterThan(0);
+    rows.forEach((r) => {
+      expect(inMessage(r)).toBeGreaterThanOrEqual(from - 1000);
+      expect(inMessage(r)).toBeLessThanOrEqual(to);
+    });
+    // and nothing in that window is missing: count by message time over a wider window
+    const wide = await e2e.sql(logsQuery(otel, c, 5000, 'desc'), String(from - 3_600_000), String(to + 60_000));
+    const inWindow = wide.filter((r) => inMessage(r) >= from - 1000 + 1000 && inMessage(r) <= to - 1000);
+    const got = new Set(rows.map((r) => String(r.message)));
+    expect(inWindow.filter((r) => !got.has(String(r.message)))).toEqual([]);
+  });
+
+  it('0.3.0 read the raw DATETIME as UTC: off by the zone the view shows it in', async () => {
+    const [raw] = await e2e.sql(
+      `SELECT observed_timestamp, message FROM ${OBS} WHERE k8s_service_name = 'otel-collector' ORDER BY observed_timestamp DESC LIMIT 1`,
+      'now-1h',
+      'now',
+      DS,
+      { hint: '' }
+    );
+    const shownIn = { session: sessionOffsetMin, ist: 330, utc: 0 }[VIEW_TIME] ?? 0;
+    expect(Math.round((Number(raw.observed_timestamp) - inMessage(raw)) / 60_000)).toBe(shownIn);
+  });
+
+  it('a hinted statement also sets query_timeout', async () => {
+    const [r] = await e2e.sql('SELECT @@query_timeout AS qt');
+    expect(r.qt).toBe(120);
+  });
+});
+
+describe('newest-first windowed search (text filters over long ranges)', () => {
+  const c = ctx(OBS);
+  const text = spec(OBS, { lineFilters: [{ op: 'include', value: 'timed out', caseSensitive: false, regex: false }] });
+
+  it('the windows together return exactly the lines of one query over the whole range', async () => {
+    const toMs = Date.now();
+    const fromMs = toMs - 4 * 3_600_000;
+    const windows = planWindows(fromMs, toMs, 'desc');
+    expect(windows.length).toBeGreaterThan(1);
+    const run = async (fromW: number, toW: number, limit: number) => {
+      const w = widenToSeconds(fromW, toW);
+      return e2e.sql(logsQuery(text, c, limit, 'desc', { fromMs: fromW, toMs: toW }), String(w.fromMs), String(w.toMs));
+    };
+    const whole = await run(fromMs, toMs, 5000);
+    expect(whole.length).toBeGreaterThan(20);
+    const parts: Array<Record<string, unknown>> = [];
+    for (const w of windows) {
+      parts.push(...(await run(w.fromMs, w.toMs, 5000)));
+    }
+    const key = (r: Record<string, unknown>) => `${r.__ts}|${r.k8s_pod_uid}|${r.message}`;
+    expect(parts.map(key)).toEqual(whole.map(key));
+  });
+
+  it('the newest window alone gives the newest lines when it has enough', async () => {
+    const toMs = Date.now();
+    const [newest] = planWindows(toMs - 4 * 3_600_000, toMs, 'desc');
+    const w = widenToSeconds(newest.fromMs, newest.toMs);
+    const first = await e2e.sql(logsQuery(text, c, 10, 'desc', newest), String(w.fromMs), String(w.toMs));
+    const ww = widenToSeconds(toMs - 4 * 3_600_000, toMs);
+    const whole = await e2e.sql(
+      logsQuery(text, c, 10, 'desc', { fromMs: toMs - 4 * 3_600_000, toMs }),
+      String(ww.fromMs),
+      String(ww.toMs)
+    );
+    expect(first.map((r) => r.__ts)).toEqual(whole.map((r) => r.__ts));
+  });
+});
+
+describe('oldest line of a view ("Oldest log")', () => {
+  it('LIMIT 1 probes and a MIN over one hour find the same time as MIN over the whole view', async () => {
+    const [{ oldest: expected }] = await e2e.sql(
+      `SELECT ${timeMsExpr('MIN(observed_timestamp)')} AS oldest FROM ${OBS}`
+    );
+    let probes = 0;
+    const anyBefore = async (ms: number) => {
+      probes++;
+      return (await e2e.sql(anyBeforeQuery(OBS, ms))).length > 0;
+    };
+    const oldestIn = async (a: number, b: number) => {
+      const [r] = await e2e.sql(oldestInRangeQuery(OBS, a, b));
+      return r?.oldest === null || r?.oldest === undefined ? undefined : Number(r.oldest);
+    };
+    const found = await findOldest(Date.now(), anyBefore, oldestIn);
+    expect(found).toBe(Number(expected));
+    expect(probes).toBeLessThan(15);
+  });
+});
+
+describe('cancelling', () => {
+  it('a cancelled request stops the StarRocks query (the data source closes the connection)', async () => {
+    const marker = `cancel_probe_${Date.now()}`;
+    const ctl = new AbortController();
+    const running = e2e.sql(`SELECT sleep(30) AS ${marker}`, 'now-1h', 'now', DS, { signal: ctl.signal });
+    running.catch(() => undefined);
+    const listed = async () =>
+      (await e2e.sql('SHOW FULL PROCESSLIST', 'now-1h', 'now', DS, { hint: '' })).some((r) =>
+        String(r.Info ?? '').includes(marker)
+      );
+    let seen = false;
+    for (let i = 0; i < 20 && !seen; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      seen = await listed();
+    }
+    expect(seen).toBe(true);
+    ctl.abort();
+    let gone = false;
+    for (let i = 0; i < 40 && !gone; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      gone = !(await listed());
+    }
+    expect(gone).toBe(true);
+  }, 30_000);
 });
 
 describe('level column tenant (cmm)', () => {

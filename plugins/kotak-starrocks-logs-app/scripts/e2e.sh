@@ -8,7 +8,12 @@
 #   ./scripts/e2e.sh tenants      # regenerate the app's provisioning file from dev/e2e/tenants/
 #   ./scripts/e2e.sh smoke        # API-level checks with curl (login, views per user, every query kind)
 #   ./scripts/e2e.sh test         # browser tests (Playwright)
+#   ./scripts/e2e.sh iceberg      # add real Iceberg tables (timestamptz and IST timestamp) + their views
+#   ./scripts/e2e.sh iceberg-smoke  # API checks on those Iceberg views
 #   ./scripts/e2e.sh down
+#
+# STARROCKS_IMAGE picks the StarRocks image (default 4.1.6, the UAT version). seed.py's FE_TIME_ZONE and
+# VIEW_TIME choose the session zone and how the views show the time column (default: like UAT).
 #
 # DATASOURCE_DIST points at the datasource plugin's built dist/ (default: ../kotak-starrocks-datasource/dist).
 # Grafana: http://localhost:23000 ("Sign in with IDAM", then any user name, e.g. kmbl3e2e). StarRocks: 127.0.0.1:29030.
@@ -16,6 +21,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 COMPOSE=(docker compose -f dev/e2e/docker-compose.yaml)
+ICEBERG=(docker compose -f dev/e2e/docker-compose.yaml -f dev/e2e/iceberg/docker-compose.iceberg.yaml)
 GRAFANA=http://localhost:23000
 STATE=dev/e2e/.state
 mkdir -p "$STATE"
@@ -55,6 +61,14 @@ up() {
   echo "ready: $GRAFANA"
 }
 
+# Real Iceberg tables through a REST catalog on S3 (SeaweedFS), read by StarRocks through an external catalog.
+iceberg() {
+  "${ICEBERG[@]}" up -d s3 iceberg-rest
+  "${ICEBERG[@]}" run --rm iceberg-writer
+  python3 dev/e2e/iceberg/starrocks_sql.py | sr
+  sr -N -e "SELECT COUNT(*) FROM iceberg_e2e.logs.eks_app_logs; SELECT COUNT(*) FROM iceberg_e2e.logs.eks_app_logs_ntz"
+}
+
 # Signs in through the mock IDAM login form as $1 and stores the Grafana session cookie in $STATE/$1.cookies
 login() {
   local user="$1" jar="$STATE/$1.cookies" authorize form_action callback
@@ -72,6 +86,8 @@ case "${1:-}" in
   tenants) tenants ;;
   login) login "${2:?user}" ;;
   smoke) npx jest -c jest.smoke.config.js --runInBand ;;
+  iceberg) iceberg ;;
+  iceberg-smoke) ICEBERG=1 npx jest -c jest.smoke.config.js --runInBand tests/smoke/iceberg.test.ts ;;
   # Chromium needs system libraries the WSL host lacks, so the tests run in the matching Playwright image
   # (host network: the browser reaches Grafana on localhost:23000 and the mock IDAM on localhost:28080).
   test)
@@ -81,7 +97,7 @@ case "${1:-}" in
       docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/work -w /work \
         mcr.microsoft.com/playwright:v1.52.0-noble npx playwright test "${@:2}"
     fi ;;
-  down) "${COMPOSE[@]}" down -v; rm -rf "$STATE" ;;
+  down) "${ICEBERG[@]}" down -v; rm -rf "$STATE" ;;
   logs) "${COMPOSE[@]}" logs -f "${2:-grafana}" ;;
-  *) echo "usage: $0 up|seed|tenants|login <user>|smoke|test|down|logs" >&2; exit 2 ;;
+  *) echo "usage: $0 up|seed|tenants|login <user>|smoke|test|iceberg|iceberg-smoke|down|logs" >&2; exit 2 ;;
 esac

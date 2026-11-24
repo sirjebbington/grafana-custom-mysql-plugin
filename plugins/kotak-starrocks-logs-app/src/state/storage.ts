@@ -1,7 +1,10 @@
 /**
- * Per-browser conveniences kept in localStorage: the last data source and view the user opened, and their
- * favourite values per view and label. Reads and writes never throw (private windows, blocked storage).
+ * Per-browser conveniences kept in localStorage: the last data source and view the user opened, their
+ * favourite values per view and label, and per view the cached time of its oldest line and how its time
+ * column relates to time zones. Reads and writes never throw (private windows, blocked storage).
  */
+import { TimeMode } from '../sql/timeZone';
+
 const PREFIX = 'kotak-starrocks-logs-app';
 
 function read<T>(key: string, fallback: T): T {
@@ -48,4 +51,43 @@ export function toggleFavorite(ds: string, view: string, label: string, value: s
   const next = cur.includes(value) ? cur.filter((x) => x !== value) : [...cur, value];
   write(favKey(ds, view, label), next);
   return next;
+}
+
+export interface OldestCache {
+  /** time of the oldest line, ms; null = the view had no lines */
+  oldestMs: number | null;
+  checkedAt: number;
+}
+
+export function getOldestCache(ds: string, view: string): OldestCache | undefined {
+  const v = read<Partial<OldestCache> | null>(`oldest:${ds}:${view}`, null);
+  if (!v || typeof v.checkedAt !== 'number' || !(v.oldestMs === null || typeof v.oldestMs === 'number')) {
+    return undefined;
+  }
+  return { oldestMs: v.oldestMs, checkedAt: v.checkedAt };
+}
+
+export function setOldestCache(ds: string, view: string, value: OldestCache) {
+  write(`oldest:${ds}:${view}`, value);
+}
+
+export interface TimeModeCache {
+  mode: TimeMode;
+  checkedAt: number;
+}
+
+export function getTimeModeCache(ds: string, view: string): TimeModeCache | undefined {
+  const v = read<Partial<TimeModeCache> | null>(`tz:${ds}:${view}`, null);
+  const kind = v?.mode?.kind;
+  if (!v || typeof v.checkedAt !== 'number' || (kind !== 'aware' && kind !== 'naive')) {
+    return undefined;
+  }
+  if (kind === 'naive' && typeof (v.mode as { offsetMinutes?: unknown }).offsetMinutes !== 'number') {
+    return undefined;
+  }
+  return { mode: v.mode as TimeMode, checkedAt: v.checkedAt };
+}
+
+export function setTimeModeCache(ds: string, view: string, value: TimeModeCache) {
+  write(`tz:${ds}:${view}`, value);
 }

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0
+
+- **Correct times on any StarRocks session zone.** Line times are computed by StarRocks
+  (`UNIX_TIMESTAMP`, epoch ms) instead of being read as UTC by the data source. With the UAT FE in
+  Asia/Kolkata, 0.3.0 showed every line 5 h 30 min late and "load more" asked for the wrong lines.
+- **Time zone detected per view** (`timeZone: "auto"`, the default): two tiny probes tell an Iceberg
+  `timestamptz` column (statements then run with `time_zone '+00:00'`) from a wall-clock `timestamp` column
+  (statements run in the zone of its wall clock: UTC or the session zone). Override with `timeZone`
+  (`"session"`, `"+00:00"`, `"Asia/Kolkata"`, …). Every statement carries a `SET_VAR` hint with the zone and
+  `query_timeout` (`queryTimeoutSeconds`, default 120).
+- **Text searches over long ranges are no longer blocked on the Logs tab**: the lines are searched newest
+  first in windows (1, 2, 4, 8 h, on hourly partition boundaries) and the search stops at the line limit.
+  Lines appear window by window, with progress and a Stop button. Above `maxScanHours` only the volume chart
+  waits for "Load volume"; Labels, Fields and Patterns still ask first.
+- **Time range limited to 24 hours** (`maxRangeHours`): typed ranges, links and zoom out are cut to their
+  last 24 hours, with a notice.
+- **Oldest log** at the top right: the time of the view's oldest line, found with LIMIT 1 probes (no scan of
+  the whole view) and cached per browser for 6 hours. A time range before it says so and offers the first
+  hours of logs.
+- Cancelling: a newer selection, leaving the page or Stop cancels the request; StarRocks stops the query
+  when the connection closes (verified on 4.1.6), and `query_timeout` is a backstop.
+- StarRocks 4.1 "no grant in this database" (5203 on DATABASE) is explained in plain words.
+- Local test stack: StarRocks 4.1.6 (the UAT version), session in Asia/Kolkata, `VIEW_TIME` modes, and real
+  Iceberg tables (`scripts/e2e.sh iceberg`, `iceberg-smoke`).
+- Settings: new optional `maxRangeHours`, `queryTimeoutSeconds`, `timeZone`; every 0.3.0 key works as before.
+
 ## 0.3.0
 
 - Name: **Logs Drilldown (StarRocks)** (plugin id unchanged).

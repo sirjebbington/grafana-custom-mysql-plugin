@@ -4,6 +4,7 @@ import { resolveConfig, resolveTenant } from '../config/config';
 import {
   fnv1a,
   stableIds,
+  toTableFrame,
   toLabelOverviewFrames,
   toLogsFrame,
   toPatternFrames,
@@ -31,6 +32,32 @@ const lines = createDataFrame({
     { name: 'k8s_pod_uid', type: FieldType.string, values: ['u1', ''] },
     { name: '__value', type: FieldType.string, values: ['proxy', 'other'] },
   ],
+});
+
+describe('line time from __ms (epoch ms computed by StarRocks)', () => {
+  // the session shows 10:00 (e.g. IST wall clock); __ms is the real instant; the raw DATETIME is not used
+  const withMs = createDataFrame({
+    fields: [
+      { name: '__ms', type: FieldType.number, values: [1795497300123] },
+      { name: '__ts', type: FieldType.string, values: ['2026-11-24 16:15:00.123456'] },
+      { name: 'message', type: FieldType.string, values: ['x'] },
+      { name: 'detected_level', type: FieldType.string, values: ['info'] },
+    ],
+  });
+
+  it('logs frame timestamp = __ms, and __ms is not a label', () => {
+    const f = toLogsFrame(withMs, { tenant: tenant(false), refId: 'A' });
+    expect(f.fields.find((x) => x.name === 'timestamp')?.values).toEqual([1795497300123]);
+    expect(f.fields.find((x) => x.name === 'labels')?.values[0]).toEqual({ detected_level: 'info' });
+  });
+
+  it('table frame shows __ms as observed_timestamp (a time field)', () => {
+    const t = toTableFrame(withMs, 'A');
+    const ts = t.fields.find((x) => x.name === 'observed_timestamp');
+    expect(ts?.type).toBe(FieldType.time);
+    expect(ts?.values).toEqual([1795497300123]);
+    expect(t.fields.some((x) => x.name === '__ms' || x.name === '__ts')).toBe(false);
+  });
 });
 
 describe('toLogsFrame', () => {

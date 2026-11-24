@@ -50,8 +50,26 @@ export interface AppJsonData {
   viewPrefix?: string;
   serviceLabel?: string;
   defaultTimeRange?: string;
+  /** longest time range a user can select, in hours (default 24); longer ranges are cut to this length */
+  maxRangeHours?: number;
+  /**
+   * text scans (line search, fields inside the message, patterns, levels read from the message) over a longer
+   * range: the Logs tab searches newest-first and loads the volume chart on request; Labels, Fields and
+   * Patterns ask first
+   */
   maxScanHours?: number;
   lineLimit?: number;
+  /**
+   * StarRocks query_timeout for every statement the app sends, in seconds, as a SET_VAR hint (default 120;
+   * 0 = the cluster default). A backstop: StarRocks also stops a query when Grafana cancels it.
+   */
+  queryTimeoutSeconds?: number;
+  /**
+   * Session time zone of the app's statements (SET_VAR hint). "auto" (default): found per view by a probe
+   * (an Iceberg timestamptz column gets '+00:00'; a wall-clock column gets the zone of its wall clock).
+   * "session": the data source's own session zone. Or a zone such as "+00:00" or "Asia/Kolkata".
+   */
+  timeZone?: string;
   labels?: string[];
   fields?: string[];
   /**
@@ -76,8 +94,11 @@ export interface ResolvedConfig {
   viewPrefix: string;
   serviceLabel: string;
   defaultTimeRange: string;
+  maxRangeHours: number;
   maxScanHours: number;
   lineLimit: number;
+  queryTimeoutSeconds: number;
+  timeZone: string;
   labels: string[];
   fields: string[];
   tenants: Record<string, TenantConfig>;
@@ -89,8 +110,11 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   viewPrefix: 'vw_eks_app_logs_',
   serviceLabel: 'k8s_service_name',
   defaultTimeRange: 'now-15m',
+  maxRangeHours: 24,
   maxScanHours: 6,
   lineLimit: 1000,
+  queryTimeoutSeconds: 120,
+  timeZone: 'auto',
   labels: DEFAULT_LABELS,
   fields: DEFAULT_FIELDS,
   tenants: {},
@@ -194,6 +218,13 @@ export function resolveConfig(jsonData?: AppJsonData | null): { config: Resolved
       errors.push(`defaultTimeRange "${j.defaultTimeRange}" must look like now-15m`);
     }
   }
+  if (j.maxRangeHours !== undefined) {
+    if (typeof j.maxRangeHours === 'number' && j.maxRangeHours >= 1 && j.maxRangeHours <= 24 * 90) {
+      c.maxRangeHours = j.maxRangeHours;
+    } else {
+      errors.push('maxRangeHours must be a number between 1 and 2160');
+    }
+  }
   if (j.maxScanHours !== undefined) {
     if (typeof j.maxScanHours === 'number' && j.maxScanHours > 0 && j.maxScanHours <= 24 * 90) {
       c.maxScanHours = j.maxScanHours;
@@ -206,6 +237,24 @@ export function resolveConfig(jsonData?: AppJsonData | null): { config: Resolved
       c.lineLimit = j.lineLimit;
     } else {
       errors.push('lineLimit must be an integer between 10 and 5000');
+    }
+  }
+  if (j.queryTimeoutSeconds !== undefined) {
+    const t = j.queryTimeoutSeconds;
+    if (typeof t === 'number' && Number.isInteger(t) && t >= 0 && t <= 3600) {
+      c.queryTimeoutSeconds = t;
+    } else {
+      errors.push('queryTimeoutSeconds must be an integer between 0 and 3600');
+    }
+  }
+  if (j.timeZone !== undefined) {
+    if (
+      typeof j.timeZone === 'string' &&
+      /^(auto|session|[+-]\d{2}:\d{2}|[A-Za-z_]+(\/[A-Za-z0-9_+-]+)*)$/.test(j.timeZone)
+    ) {
+      c.timeZone = j.timeZone;
+    } else {
+      errors.push('timeZone must be "auto", "session", or a zone like "+00:00" or "Asia/Kolkata"');
     }
   }
   for (const key of ['labels', 'fields'] as const) {
