@@ -33,6 +33,16 @@ export function traceLink(trace: TraceConfig): DataLink {
   };
 }
 
+/** Nanoseconds within the millisecond of a "YYYY-MM-DD HH:MM:SS.ffffff" text (0 when there are none). */
+export function subMillisecondNanos(tsRaw: unknown): number {
+  const m = /\.(\d+)/.exec(str(tsRaw));
+  if (!m) {
+    return 0;
+  }
+  const micros = Number(m[1].padEnd(6, '0').slice(0, 6));
+  return (micros % 1000) * 1000;
+}
+
 export interface LogsFrameOptions {
   tenant: ResolvedTenant;
   refId: string;
@@ -72,7 +82,14 @@ export function toLogsFrame(frame: DataFrame, opts: LogsFrameOptions): DataFrame
   });
 
   const fields: Field[] = [
-    { name: 'timestamp', type: FieldType.time, config: {}, values: rows.map((i) => ts[i]) },
+    {
+      name: 'timestamp',
+      type: FieldType.time,
+      config: {},
+      values: rows.map((i) => ts[i]),
+      // sub-millisecond part from the exact text, so lines within one millisecond keep their order
+      nanos: rows.map((i) => subMillisecondNanos(tsRaw[i])),
+    },
     { name: 'body', type: FieldType.string, config: {}, values: rows.map((i) => str(msg[i])) },
     { name: 'severity', type: FieldType.string, config: {}, values: rows.map((i) => str(lvl[i]) || 'unknown') },
     // stable across responses (timestamp + pod + message), so "load more" merges overlapping lines

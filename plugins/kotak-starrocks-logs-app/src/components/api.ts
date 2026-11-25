@@ -30,6 +30,8 @@ export interface ExplorationApi {
   selectValue(label: string, value: string): void;
   setSearch(search: string): void;
   allowLongScan(): void;
+  /** service grid of a message-level tenant: split volumes by level (sampled over long ranges) */
+  setGridLevels(on: boolean): void;
   shrinkRange(hours: number): void;
 }
 

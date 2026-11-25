@@ -10,6 +10,7 @@ import {
   contextQuery,
   fieldBreakdownQuery,
   labelOverviewQuery,
+  levelExpr,
   logsQuery,
   oldestInRangeQuery,
   patternsQuery,
@@ -440,6 +441,99 @@ describe('cancelling', () => {
     }
     expect(gone).toBe(true);
   }, 30_000);
+});
+
+describe('0.0.1 SQL on StarRocks (level split, sampling, HTTP status levels, context ties)', () => {
+  const c = ctx(OBS);
+  const sumBy = (rows: Array<Record<string, unknown>>, key: string) => {
+    const m: Record<string, number> = {};
+    rows.forEach((r) => (m[String(r[key])] = (m[String(r[key])] ?? 0) + Number(r.c)));
+    return m;
+  };
+
+  it('the UNION ALL level split counts exactly what one CASE expression counts', async () => {
+    const split = await e2e.sql(volumeQuery(spec(OBS), c, 3600, true), 'now-6h', 'now');
+    const caseSql = [
+      `SELECT (UNIX_TIMESTAMP(observed_timestamp) DIV 3600) * 3600 AS t, ${levelExpr(c.tenant, c)} AS g, COUNT(*) AS c`,
+      `FROM ${OBS} WHERE $__timeFilter(observed_timestamp) GROUP BY t, g`,
+    ].join('\n');
+    const single = await e2e.sql(caseSql, 'now-6h', 'now');
+    expect(sumBy(split, 'g')).toEqual(sumBy(single, 'g'));
+    expect(Object.keys(sumBy(split, 'g')).length).toBeGreaterThan(2);
+  });
+
+  it('a level column tenant (cmm) needs no split, and the split SQL on it gives the same counts', async () => {
+    const cc = ctx(CMM);
+    const column = await e2e.sql(volumeQuery(spec(CMM), cc, 3600, true), 'now-6h', 'now');
+    const asMessage = {
+      ...cc,
+      tenant: { ...cc.tenant, level: { source: 'message' as const, regex: c.tenant.level.regex } },
+    };
+    const split = await e2e.sql(volumeQuery(spec(CMM), asMessage, 3600, true), 'now-6h', 'now');
+    // every cmm row has a filled level column, so the message branch adds nothing
+    expect(sumBy(split, 'g')).toEqual(sumBy(column, 'g'));
+  });
+
+  it('a level filter on lines: one top-N per level source gives exactly the lines of one CASE query (mixed level column)', async () => {
+    // cmm read as a "message" tenant: most rows have the level column, about 1 in 13 has it empty
+    const cc = ctx(CMM);
+    const asMessage = {
+      ...cc,
+      tenant: { ...cc.tenant, level: { source: 'message' as const, regex: c.tenant.level.regex } },
+    };
+    const filtered = spec(CMM, { levels: ['error', 'unknown'] });
+    const key = (r: Record<string, unknown>) => `${r.__ts}|${r.k8s_pod_uid}|${r.message}`;
+    const oneCase = (limit: number) =>
+      [
+        'SELECT CAST(observed_timestamp AS VARCHAR) AS __ts, k8s_pod_uid, message',
+        `FROM ${CMM} WHERE $__timeFilter(observed_timestamp)`,
+        `  AND ${levelExpr(asMessage.tenant, asMessage)} IN ('error', 'unknown')`,
+        `ORDER BY observed_timestamp DESC LIMIT ${limit}`,
+      ].join('\n');
+    // every matching line (the limit is above the match count)
+    const split = await e2e.sql(logsQuery(filtered, asMessage, 8000, 'desc'), 'now-6h', 'now');
+    const single = await e2e.sql(oneCase(8000), 'now-6h', 'now');
+    expect(split.length).toBeGreaterThan(1000);
+    expect(split.length).toBeLessThan(8000);
+    expect(split.map(key).sort()).toEqual(single.map(key).sort());
+    // both branches contribute: filled ERROR / fatal rows and empty-level rows
+    const levels = new Set(split.map((r) => r.detected_level));
+    expect(levels).toEqual(new Set(['error', 'unknown']));
+    // the top 50: the same newest times, in order
+    const top = await e2e.sql(logsQuery(filtered, asMessage, 50, 'desc'), 'now-6h', 'now');
+    const topCase = await e2e.sql(oneCase(50), 'now-6h', 'now');
+    expect(top.map((r) => r.__ts)).toEqual(topCase.map((r) => r.__ts));
+  });
+
+  it('the 10 % hash sample estimates the counts within 15 %', async () => {
+    const full = await e2e.sql(volumeQuery(spec(OBS), c, 3600, true), 'now-6h', 'now');
+    const sampled = await e2e.sql(volumeQuery(spec(OBS), c, 3600, true, 10), 'now-6h', 'now');
+    const total = (rows: Array<Record<string, unknown>>) => rows.reduce((a, r) => a + Number(r.c), 0);
+    expect(Math.abs(total(sampled) - total(full)) / total(full)).toBeLessThan(0.15);
+    sampled.forEach((r) => expect(Number(r.c) % 10).toBe(0));
+  });
+
+  it('proxy access logs get their level from the HTTP status class', async () => {
+    const proxy = spec(OBS, { filters: [{ key: 'k8s_service_name', op: '=', value: 'proxy' }] });
+    const levels = sumBy(await e2e.sql(volumeQuery(proxy, c, 3600, true), 'now-6h', 'now'), 'g');
+    expect(levels.info).toBeGreaterThan(0);
+    expect((levels.warn ?? 0) + (levels.error ?? 0)).toBeGreaterThan(0);
+    expect(levels.unknown ?? 0).toBeLessThan(0.05 * Object.values(levels).reduce((a, b) => a + b, 0));
+  });
+
+  it('show context: lines tied on the exact microsecond are ordered by message on the right side of the anchor', async () => {
+    const [b] = await e2e.sql(
+      `SELECT CAST(observed_timestamp AS VARCHAR) AS __ts, message FROM ${OBS} WHERE k8s_pod_name = 'tie-pod-0' AND message = 'tie line B'`
+    );
+    const ts = String(b.__ts);
+    const back = await e2e.sql(contextQuery(OBS, c, 'k8s_pod_name', 'tie-pod-0', ts, 'backward', 10, 'tie line B'));
+    expect(back.map((r) => r.message)).toEqual(['tie line A', 'tie before']);
+    const fwdFromA = await e2e.sql(contextQuery(OBS, c, 'k8s_pod_name', 'tie-pod-0', ts, 'forward', 10, 'tie line A'));
+    expect(fwdFromA.map((r) => r.message)).toEqual(['tie line B', 'tie after']);
+    // the old strict comparison loses the tied line
+    const strict = await e2e.sql(contextQuery(OBS, c, 'k8s_pod_name', 'tie-pod-0', ts, 'backward', 10));
+    expect(strict.map((r) => r.message)).toEqual(['tie before']);
+  });
 });
 
 describe('level column tenant (cmm)', () => {

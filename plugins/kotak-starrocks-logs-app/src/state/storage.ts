@@ -91,3 +91,12 @@ export function getTimeModeCache(ds: string, view: string): TimeModeCache | unde
 export function setTimeModeCache(ds: string, view: string, value: TimeModeCache) {
   write(`tz:${ds}:${view}`, value);
 }
+
+/** Logs tab: volume chart shown (default) or hidden, per browser. */
+export function getVolumeVisible(): boolean {
+  return read<boolean>('volume', true) !== false;
+}
+
+export function setVolumeVisible(visible: boolean) {
+  write('volume', visible);
+}

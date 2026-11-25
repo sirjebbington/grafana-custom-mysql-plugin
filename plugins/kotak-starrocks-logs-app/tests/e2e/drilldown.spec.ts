@@ -453,7 +453,8 @@ test.describe('as kmbl3e2e (two granted views)', () => {
     await page.screenshot({ path: `${SHOTS}/09-long-text-search.png` });
     await page.getByRole('button', { name: 'Load volume' }).click();
     await expect(page.getByTestId('volume-deferred')).toHaveCount(0);
-    await expect(page.getByText('Log volume', { exact: true })).toBeVisible();
+    // 6 hours of a tenant whose level comes from the message: estimated from a sample
+    await expect(page.getByTestId('volume-panel')).toContainText('Log volume (≈ estimated from 1 in 10 lines)');
     await expect(logsMain(page)).toContainText('upstream timed out');
   });
 
@@ -593,6 +594,147 @@ test.describe('as kmbl3e2e (two granted views)', () => {
     await expect(logsMain(page)).toContainText('reconciled');
     await expect(page).toHaveURL(/var-filters=/);
     await expect(page).not.toHaveURL(/[?&]filter=/);
+  });
+});
+
+test.describe('0.0.1: journey, loading, levels, context (laptop size)', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+  test.beforeEach(async ({ page }) => {
+    await login(page, 'kmbl3e2e');
+  });
+
+  test('pickers stay where they are between the grid and the logs; Oldest log sits in the bar under them', async ({
+    page,
+  }) => {
+    await page.goto(appUrl({ view: OBS }));
+    await expect(page.getByTestId('service-row-apilog')).toBeVisible();
+    const pick = () => page.getByTestId('datasource-picker').boundingBox();
+    const onGrid = await pick();
+    const bar = page.getByTestId('page-bar');
+    await expect(bar.getByTestId('show-logs')).toBeVisible();
+    await expect(bar.getByTestId('oldest-log')).toContainText('Oldest log');
+    await page.getByTestId('show-logs-apilog').click();
+    await expect(bar.getByTestId('back-to-services')).toBeVisible();
+    const onLogs = await pick();
+    expect(Math.abs(onGrid!.x - onLogs!.x)).toBeLessThan(1);
+    expect(Math.abs(onGrid!.y - onLogs!.y)).toBeLessThan(1);
+    // the bar is below the pickers' row
+    const barBox = await bar.boundingBox();
+    expect(barBox!.y).toBeGreaterThan(onLogs!.y + onLogs!.height - 1);
+    await page.screenshot({ path: `${SHOTS}/20-header-1440.png` });
+  });
+
+  test('the Logs tab fits the window: only the lines scroll, not the page', async ({ page }) => {
+    await page.goto(appUrl({ view: OBS, filter: filter('k8s_service_name', '=', 'apilog') }));
+    await expect(logsMain(page).locator('tr').first()).toBeVisible();
+    await page.waitForTimeout(500);
+    const overflow = await page.evaluate(() => {
+      const el = document.scrollingElement ?? document.body;
+      return el.scrollHeight - el.clientHeight;
+    });
+    expect(overflow).toBeLessThanOrEqual(1);
+    const panel = await logsMain(page).boundingBox();
+    expect(panel!.height).toBeGreaterThan(250);
+    // hiding the volume gives the lines more room, and is remembered
+    await page.getByTestId('toggle-volume').click({ force: true });
+    await expect(page.getByTestId('volume-panel')).toHaveCount(0);
+    const bigger = await logsMain(page).boundingBox();
+    expect(bigger!.height).toBeGreaterThan(panel!.height + 100);
+    await page.reload();
+    await expect(logsMain(page).locator('tr').first()).toBeVisible();
+    await expect(page.getByTestId('volume-panel')).toHaveCount(0);
+    await page.getByTestId('toggle-volume').click({ force: true });
+    await expect(page.getByTestId('volume-panel')).toBeVisible();
+    await page.screenshot({ path: `${SHOTS}/21-logs-1440.png` });
+  });
+
+  test('while queries run: the refresh button spins (tooltip "Cancel all queries"), "Loading" with Cancel in the bar', async ({
+    page,
+  }) => {
+    await page.route('**/api/ds/query**', async (route) => {
+      if ((route.request().postData() ?? '').includes('GROUP BY t, v, lvl')) {
+        await new Promise((r) => setTimeout(r, 4000));
+      }
+      await route.continue();
+    });
+    await page.goto(appUrl({ view: OBS }));
+    await expect(page.getByTestId('grid-loading')).toBeVisible();
+    await expect(page.getByTestId('running-indicator')).toBeVisible();
+    await page.getByTestId('data-testid RefreshPicker run button').hover();
+    await expect(page.getByText('Cancel all queries')).toBeVisible();
+    await page.screenshot({ path: `${SHOTS}/22-running.png` });
+    await page.getByTestId('cancel-queries').click();
+    await expect(page.getByTestId('running-indicator')).toHaveCount(0);
+  });
+
+  test('going back to the grid shows it at once from the cache (no volume query again)', async ({ page }) => {
+    let volumeQueries = 0;
+    page.on('request', (r) => {
+      if (r.url().includes('/api/ds/query') && (r.postData() ?? '').includes('GROUP BY t, v, lvl')) {
+        volumeQueries++;
+      }
+    });
+    await page.goto(appUrl({ view: OBS }));
+    await expect(page.getByTestId('service-row-apilog')).toBeVisible();
+    expect(volumeQueries).toBe(1);
+    await page.getByTestId('show-logs-apilog').click();
+    await expect(logsMain(page).locator('tr').first()).toBeVisible();
+    await page.goBack();
+    await expect(page.getByTestId('service-row-apilog')).toBeVisible({ timeout: 3000 });
+    expect(volumeQueries).toBe(1);
+  });
+
+  test('levels read from the message: plain grid by default, split on request; estimated beyond an hour', async ({
+    page,
+  }) => {
+    await page.goto(appUrl({ view: OBS }));
+    const proxy = page.getByTestId('service-row-proxy');
+    await expect(proxy).toContainText('all');
+    await page.getByTestId('grid-levels').click({ force: true });
+    await expect(page).toHaveURL(/levelsplit=1/);
+    // access logs get a level from the HTTP status class
+    await expect(proxy).toContainText('info');
+    await expect(page.getByText(/estimated/)).toHaveCount(0);
+    await page.goto(appUrl({ view: OBS, levelsplit: '1', from: 'now-3h', to: 'now' }));
+    await expect(page.getByText('≈ estimated (1 in 10 lines)')).toBeVisible();
+    await expect(page.getByTestId('service-row-proxy')).toContainText('info');
+    await page.screenshot({ path: `${SHOTS}/23-grid-levels-sampled.png` });
+    // the Logs tab volume of one service: estimated over 3 hours, exact over 1 hour
+    await page.goto(appUrl({ view: OBS, filter: filter('k8s_service_name', '=', 'proxy'), from: 'now-3h', to: 'now' }));
+    await expect(page.getByText('Log volume (≈ estimated from 1 in 10 lines)')).toBeVisible();
+    await page.goto(appUrl({ view: OBS, filter: filter('k8s_service_name', '=', 'proxy'), from: 'now-1h', to: 'now' }));
+    await expect(page.getByText('Log volume', { exact: true })).toBeVisible();
+  });
+
+  test('the 24-hour limit is a notice under the header, not a toast over the time picker', async ({ page }) => {
+    await page.goto(appUrl({ view: OBS, from: 'now-7d', to: 'now' }));
+    const notice = page.getByTestId('range-capped');
+    await expect(notice).toContainText('Time range limited to 24 hours');
+    const time = await page.getByTestId('data-testid TimePicker Open Button').boundingBox();
+    const box = await notice.boundingBox();
+    expect(box!.y).toBeGreaterThan(time!.y + time!.height - 1);
+    await notice.getByLabel('Dismiss').click();
+    await expect(notice).toHaveCount(0);
+  });
+
+  test('show context: which pod is matched, and the pin keeps the line in view until unpinned', async ({ page }) => {
+    await page.goto(appUrl({ view: OBS, filter: filter('k8s_service_name', '=', 'apilog') }));
+    const row = logsMain(page).locator('tr').nth(10);
+    await row.hover();
+    await row.getByLabel('Show context').click();
+    const modal = page.getByRole('dialog');
+    await expect(modal.getByTestId('context-scope')).toContainText('k8s_pod_uid=');
+    await expect(modal.getByTestId('context-scope')).toContainText('k8s_service_name="apilog"');
+    const entry = modal.getByTestId('entry-row');
+    const position = () => entry.evaluate((el) => getComputedStyle(el).position);
+    await expect.poll(position).toBe('sticky');
+    await entry.hover();
+    await entry.getByLabel('Unpin line').last().click();
+    await expect.poll(position).toBe('static');
+    await entry.hover();
+    await entry.getByLabel('Pin line').last().click();
+    await expect.poll(position).toBe('sticky');
+    await page.screenshot({ path: `${SHOTS}/24-context-scope.png` });
   });
 });
 

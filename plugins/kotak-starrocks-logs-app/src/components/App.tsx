@@ -8,6 +8,7 @@ import {
   SceneAppPage,
   SceneReactObject,
   RuntimeDataSource,
+  behaviors,
   registerRuntimeDataSource,
   useSceneApp,
 } from '@grafana/scenes';
@@ -22,6 +23,8 @@ function getExploreScene(): EmbeddedScene {
   return new EmbeddedScene({
     // at most maxRangeHours (24 h by default), however the range is chosen
     $timeRange: new CappedTimeRange({ from: getAppConfig().defaultTimeRange, to: 'now' }),
+    // knows which queries run: the refresh button spins (and cancels them on click), the header shows "Loading"
+    $behaviors: [new behaviors.SceneQueryController()],
     body: new LogsExploration(),
   });
 }

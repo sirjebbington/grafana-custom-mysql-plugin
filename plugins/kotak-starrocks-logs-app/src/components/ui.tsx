@@ -1,5 +1,5 @@
 import { css, cx } from '@emotion/css';
-import { ReactNode } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 
 import { DataFrame, GrafanaTheme2, dateTimeFormat } from '@grafana/data';
 import { Alert, Button, IconButton, LoadingPlaceholder, useStyles2, useTheme2 } from '@grafana/ui';
@@ -144,3 +144,17 @@ const getStyles = (theme: GrafanaTheme2) => ({
   sampleTime: css({ color: theme.colors.text.secondary }),
   sampleEmpty: css({ color: theme.colors.text.secondary, padding: theme.spacing(2) }),
 });
+
+/**
+ * Seconds since this element appeared ("…" for the first two seconds). Mount it only while something runs, so
+ * every run starts from 0.
+ */
+export function Elapsed() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return <span data-testid="elapsed">{seconds >= 2 ? ` ${seconds} s` : '…'}</span>;
+}

@@ -1,4 +1,16 @@
-import { Observable, Subscription, catchError, combineLatest, from, lastValueFrom, map, of, switchMap } from 'rxjs';
+import {
+  Observable,
+  Subscription,
+  catchError,
+  combineLatest,
+  defer,
+  from,
+  lastValueFrom,
+  map,
+  of,
+  switchMap,
+  tap,
+} from 'rxjs';
 
 import {
   DataFrame,
@@ -13,6 +25,7 @@ import {
   dateTime,
 } from '@grafana/data';
 import { RuntimeDataSource } from '@grafana/scenes';
+import { createElement, ReactNode } from 'react';
 import { DataQuery } from '@grafana/schema';
 
 import {
@@ -46,6 +59,8 @@ import {
 } from '../sql/builder';
 import { QueryKind, QueryParams, QuerySpec } from '../state/types';
 import { fetchColumns, runSql } from './api';
+import { ContextScope } from './ContextScope';
+import { getCached, putCached } from './queryCache';
 import { ensureSessionZone } from './timeZone';
 import {
   concatFrames,
@@ -120,11 +135,11 @@ export function buildSql(q: LogsAppQuery, ctx: BuildContext, range: TimeRange): 
   const config = getAppConfig();
   switch (q.kind) {
     case 'serviceVolume':
-      return serviceVolumeQuery(q.spec, ctx, p.label ?? config.serviceLabel, bucket, p.withLevel ?? true);
+      return serviceVolumeQuery(q.spec, ctx, p.label ?? config.serviceLabel, bucket, p.withLevel ?? true, p.sample);
     case 'serviceSamples':
       return serviceSamplesQuery(q.spec, ctx, p.label ?? config.serviceLabel, p.values ?? [], p.perValue ?? 10);
     case 'volume':
-      return volumeQuery(q.spec, ctx, bucket, p.withLevel ?? true);
+      return volumeQuery(q.spec, ctx, bucket, p.withLevel ?? true, p.sample);
     case 'logs':
     case 'table':
       // exact bounds: "load more" (infinite scrolling) asks for lines older/newer than a loaded line
@@ -276,8 +291,22 @@ function runWindowedLines(
   });
 }
 
-/** Runs one structured query and returns frames ready for the panels. */
+/** Cache key of a query: everything that changes its SQL or its result. */
+export function queryCacheKey(q: LogsAppQuery, range: TimeRange): string {
+  return JSON.stringify([q.kind, q.spec, q.params ?? {}, q.refId, range.from.valueOf(), range.to.valueOf()]);
+}
+
+/** Runs one structured query, or answers from the short-lived cache (see queryCache.ts). */
 export function runLogsQuery(q: LogsAppQuery, range: TimeRange, requestId?: string): Observable<DataQueryResponse> {
+  const key = queryCacheKey(q, range);
+  return defer(() => {
+    const hit = getCached(key);
+    return hit ? of(hit) : runLogsQueryUncached(q, range, requestId).pipe(tap((r) => putCached(key, r)));
+  });
+}
+
+/** Runs one structured query and returns frames ready for the panels. */
+function runLogsQueryUncached(q: LogsAppQuery, range: TimeRange, requestId?: string): Observable<DataQueryResponse> {
   return from(buildContext(q.spec.view, range, q.spec.datasource)).pipe(
     switchMap((ctx) => {
       if ((q.kind === 'logs' || q.kind === 'table') && needsMessageScan(q.spec, ctx.tenant, false)) {
@@ -350,6 +379,16 @@ export class StarRocksLogsDataSource extends RuntimeDataSource<LogsAppQuery> {
     );
   }
 
+  /** Top of the "Show context" modal: which pod's lines are shown, as in the Log Analytics UI. */
+  getLogRowContextUi(row: LogRowModel): ReactNode {
+    const labels = (row.dataFrame.fields.find((f) => f.name === 'labels')?.values[row.rowIndex] ?? {}) as Record<
+      string,
+      string
+    >;
+    const podColumn = labels[POD_UID_COLUMN] ? POD_UID_COLUMN : POD_NAME_COLUMN;
+    return createElement(ContextScope, { labels, podColumn });
+  }
+
   /** "Show context": lines of the same pod before/after the clicked line (used by the Logs panel modal). */
   async getLogRowContext(
     row: LogRowModel,
@@ -380,7 +419,8 @@ export class StarRocksLogsDataSource extends RuntimeDataSource<LogsAppQuery> {
     };
     const datasource = query?.spec?.datasource ?? '';
     const ctx = await buildContext(view, range, datasource);
-    const sql = contextQuery(view, ctx, podColumn, pod, tsRaw, direction, options?.limit ?? 50);
+    // the message breaks ties: lines of the same pod with the same microsecond (42 % of lines on UAT)
+    const sql = contextQuery(view, ctx, podColumn, pod, tsRaw, direction, options?.limit ?? 50, row.entry);
     const res = await lastValueFrom(runSql(sql, { datasource, view, refId: `context-${direction}`, range }));
     const err = res.errors?.[0] ?? res.error;
     if (err) {

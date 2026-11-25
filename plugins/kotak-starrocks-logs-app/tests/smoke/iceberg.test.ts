@@ -145,6 +145,16 @@ run('real Iceberg tables on the UAT StarRocks version (session Asia/Kolkata)', (
         expect(found).toBe(Number(expected));
       });
 
+      it('level split and the 10 % hash sample work on Iceberg (murmur_hash3_32 over the instant)', async () => {
+        const { config } = resolveConfig({ tenants: { default: { level: { source: 'message' } } } });
+        const mc: BuildContext = { ...ctx(view), tenant: resolveTenant(config, view, DS.uid) };
+        const full = await q(volumeQuery(otel(view, { filters: [] }), mc, 3600, true), 'now-6h', 'now+1h');
+        const sampled = await q(volumeQuery(otel(view, { filters: [] }), mc, 3600, true, 10), 'now-6h', 'now+1h');
+        const total = (rows: Array<Record<string, unknown>>) => rows.reduce((a, r) => a + Number(r.c), 0);
+        expect(total(full)).toBeGreaterThan(1000);
+        expect(Math.abs(total(sampled) - total(full)) / total(full)).toBeLessThan(0.15);
+      });
+
       it('partition pruning: a one-hour line query reads one or two of the hourly partitions', async () => {
         const [newest] = await q(logsQuery(otel(view), ctx(view), 1, 'desc'), 'now-12h', 'now+12h');
         const to = Number(newest.__ms);

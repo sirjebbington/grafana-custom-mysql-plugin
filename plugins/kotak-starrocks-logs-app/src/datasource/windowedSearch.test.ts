@@ -3,6 +3,7 @@ import { Observable, of, toArray, firstValueFrom, Subject } from 'rxjs';
 import { DataQueryResponse, LoadingState, TimeRange, dateTime, toDataFrame } from '@grafana/data';
 
 import { runLogsQuery, searchProgressOf, LogsAppQuery } from './StarRocksLogsDataSource';
+import { clearQueryCache } from './queryCache';
 import { emptySpec } from '../state/types';
 
 // only the data source's own code is under test: no Grafana runtime, no Scenes
@@ -10,6 +11,7 @@ jest.mock('@grafana/scenes', () => ({ RuntimeDataSource: class {} }));
 
 const runSql = jest.fn();
 jest.mock('./timeZone', () => ({ ensureSessionZone: async () => undefined }));
+jest.mock('./ContextScope', () => ({ ContextScope: () => null }));
 jest.mock('./api', () => ({
   runSql: (...args: unknown[]) => runSql(...args),
   fetchColumns: async () => ['observed_timestamp', 'message', 'level', 'k8s_service_name', 'k8s_pod_uid'],
@@ -57,7 +59,10 @@ function textQuery(limit: number): LogsAppQuery {
   return { refId: 'A', kind: 'logs', spec, params: { limit, sort: 'desc' } };
 }
 
-beforeEach(() => runSql.mockReset());
+beforeEach(() => {
+  runSql.mockReset();
+  clearQueryCache();
+});
 
 describe('windowed text search in the data source', () => {
   it('stops at the line limit: the newest window is enough when it has the lines', async () => {

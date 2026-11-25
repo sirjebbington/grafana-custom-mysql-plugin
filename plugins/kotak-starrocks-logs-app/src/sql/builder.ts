@@ -189,21 +189,133 @@ export function pickBucketSeconds(rangeMs: number, maxPoints = 120): number {
   return BUCKETS.find((b) => b >= ideal) ?? Math.ceil(ideal / 86400) * 86400;
 }
 
-/** Raw (not normalised) level value, lower case. */
-export function levelRawExpr(tenant: ResolvedTenant): string {
-  if (tenant.level.source === 'column') {
-    return `lower(trim(${quoteIdent(LEVEL_COLUMN)}))`;
-  }
+/** Normalises a lower-case raw level value: error | warn | info | debug | unknown. */
+function normaliseLevel(raw: string): string {
+  const whens = Object.entries(LEVEL_ALIASES)
+    .flatMap(([level, aliases]) => aliases.map((a) => `WHEN '${a}' THEN '${level}'`))
+    .join(' ');
+  return `(CASE ${raw} ${whens} ELSE 'unknown' END)`;
+}
+
+const LEVEL_COL = quoteIdent(LEVEL_COLUMN);
+
+/** Raw level from the `level` column, lower case. */
+function columnLevelRaw(): string {
+  return `lower(trim(${LEVEL_COL}))`;
+}
+
+/** Raw level read from the message with the tenant's regexes (first match wins), lower case. */
+function messageLevelRaw(tenant: ResolvedTenant): string {
   const tries = tenant.level.regex.map((re) => `nullif(regexp_extract(${M}, ${lit(re)}, 1), '')`);
   return `lower(coalesce(${[...tries, "''"].join(', ')}))`;
 }
 
+/** The `level` column is filled on this row. */
+export function levelFilledCond(): string {
+  return `trim(${LEVEL_COL}) != ''`;
+}
+
+/** The `level` column is empty (or NULL) on this row: the level has to come from the message. */
+export function levelEmptyCond(): string {
+  return `(${LEVEL_COL} IS NULL OR trim(${LEVEL_COL}) = '')`;
+}
+
+/** Whether a "message" tenant's view also has the level column (then filled rows use it). */
+function hasLevelColumn(ctx?: Pick<BuildContext, 'columns'>): boolean {
+  return ctx === undefined || ctx.columns.includes(LEVEL_COLUMN);
+}
+
+/**
+ * Raw (not normalised) level value, lower case. "column" tenants read the level column. "message" tenants read
+ * the level column where the pipeline filled it, and the message (tenant regexes) where it is empty, so they keep
+ * working, faster, once the pipeline starts filling it. In aggregations use levelSplit instead: StarRocks
+ * evaluates both CASE branches on every row (measured on UAT: 17.1 s vs 6.0 s with a WHERE split).
+ */
+export function levelRawExpr(tenant: ResolvedTenant, ctx?: Pick<BuildContext, 'columns'>): string {
+  if (tenant.level.source === 'column') {
+    return columnLevelRaw();
+  }
+  if (!hasLevelColumn(ctx)) {
+    return messageLevelRaw(tenant);
+  }
+  return `(CASE WHEN ${levelFilledCond()} THEN ${columnLevelRaw()} ELSE ${messageLevelRaw(tenant)} END)`;
+}
+
 /** Normalised level: error | warn | info | debug | unknown. A simple CASE evaluates the raw value once. */
-export function levelExpr(tenant: ResolvedTenant): string {
-  const whens = Object.entries(LEVEL_ALIASES)
-    .flatMap(([level, aliases]) => aliases.map((a) => `WHEN '${a}' THEN '${level}'`))
-    .join(' ');
-  return `(CASE ${levelRawExpr(tenant)} ${whens} ELSE 'unknown' END)`;
+export function levelExpr(tenant: ResolvedTenant, ctx?: Pick<BuildContext, 'columns'>): string {
+  return normaliseLevel(levelRawExpr(tenant, ctx));
+}
+
+/**
+ * For aggregations by level: one SELECT per way of getting the level, each with its own row condition, to be
+ * joined with UNION ALL (the regexp then runs only on rows without a filled level column).
+ */
+export function levelSplit(tenant: ResolvedTenant, ctx: BuildContext): Array<{ expr: string; cond?: string }> {
+  if (tenant.level.source === 'column') {
+    return [{ expr: normaliseLevel(columnLevelRaw()) }];
+  }
+  if (!hasLevelColumn(ctx)) {
+    return [{ expr: normaliseLevel(messageLevelRaw(tenant)) }];
+  }
+  return [
+    { expr: normaliseLevel(columnLevelRaw()), cond: levelFilledCond() },
+    { expr: normaliseLevel(messageLevelRaw(tenant)), cond: levelEmptyCond() },
+  ];
+}
+
+/** Column used to spread a hash sample evenly over pods and time. */
+function sampleKey(ctx: BuildContext): string {
+  const pod = ['k8s_pod_uid', 'k8s_pod_name'].find((c) => ctx.columns.includes(c));
+  return pod ? `${quoteIdent(pod)}, ${T}` : T;
+}
+
+/**
+ * Keeps about 1 in n rows, spread evenly (hash of pod and exact time; sampling by time alone is biased because
+ * lines arrive in bursts: 12.9 % kept instead of 10 % on UAT). Counts are multiplied by n.
+ */
+export function sampleCond(ctx: BuildContext, n: number): string {
+  return `MOD(ABS(murmur_hash3_32(${sampleKey(ctx)})), ${Math.max(1, Math.floor(n))}) = 0`;
+}
+
+/**
+ * GROUP BY bucket (and grouping columns) and level, with the level split (levelSplit) and optional sampling.
+ * `select` gives the grouping columns other than the level (already aliased), `groupBy` their aliases.
+ */
+function countByLevel(
+  spec: QuerySpec,
+  ctx: BuildContext,
+  opts: { select: string[]; groupBy: string[]; levelAlias: string; withLevel: boolean; sample?: number }
+): string {
+  const n = opts.sample && opts.sample > 1 ? Math.floor(opts.sample) : 1;
+  const sample = n > 1 ? [sampleCond(ctx, n)] : [];
+  const count = n > 1 ? `COUNT(*) * ${n}` : 'COUNT(*)';
+  // split by level source when levels are shown or filtered: each branch reads the level one way only
+  const parts: Array<{ out: string; levelBy?: string; cond?: string }> =
+    opts.withLevel || activeLevels(spec).length > 0
+      ? levelSplit(ctx.tenant, ctx).map((p) => ({
+          out: opts.withLevel ? p.expr : `'all'`,
+          levelBy: p.expr,
+          cond: p.cond,
+        }))
+      : [{ out: `'all'` }];
+  const groupBy = [...opts.groupBy, opts.levelAlias].join(', ');
+  const selects = parts.map((p) =>
+    [
+      `SELECT ${[...opts.select, `${p.out} AS ${opts.levelAlias}`, `${count} AS c`].join(', ')}`,
+      from(spec.view),
+      `WHERE ${whereClause(spec, ctx, { before: [...(p.cond ? [p.cond] : []), ...sample], levelBy: p.levelBy })}`,
+      `GROUP BY ${groupBy}`,
+    ].join('\n')
+  );
+  if (selects.length === 1) {
+    return `${selects[0]}\nORDER BY t`;
+  }
+  return [
+    `SELECT ${[...opts.groupBy, opts.levelAlias, 'SUM(c) AS c'].join(', ')}`,
+    `FROM (\n${selects.join('\nUNION ALL\n')}\n) u`,
+    `GROUP BY ${groupBy}`,
+    `ORDER BY t`,
+  ].join('\n');
 }
 
 function labelCond(key: string, filters: LabelFilter[]): string[] {
@@ -265,10 +377,20 @@ export function patternCond(p: PatternConfig): string {
 interface WhereOptions {
   skipPatterns?: boolean;
   extra?: string[];
+  /** cheap row conditions placed right after the time filter, before any regexp (level source, sample) */
+  before?: string[];
+  /** level expression for a level filter (a levelSplit branch); default levelExpr (CASE: column, else message) */
+  levelBy?: string;
+}
+
+/** The level filter of a spec, or none when no level or every level is selected. */
+function activeLevels(spec: QuerySpec): string[] {
+  const levels = spec.levels.filter((l) => (LEVELS as readonly string[]).includes(l));
+  return levels.length > 0 && levels.length < LEVELS.length ? levels : [];
 }
 
 export function whereClause(spec: QuerySpec, ctx: BuildContext, opts: WhereOptions = {}): string {
-  const conds: string[] = [timeFilter()];
+  const conds: string[] = [timeFilter(), ...(opts.before ?? [])];
   const byKey = new Map<string, LabelFilter[]>();
   for (const f of spec.filters) {
     if (!isIdentifier(f.key) || !ctx.columns.includes(f.key)) {
@@ -278,9 +400,9 @@ export function whereClause(spec: QuerySpec, ctx: BuildContext, opts: WhereOptio
   }
   byKey.forEach((fs, key) => conds.push(...labelCond(key, fs)));
 
-  const levels = spec.levels.filter((l) => (LEVELS as readonly string[]).includes(l));
-  if (levels.length > 0 && levels.length < LEVELS.length) {
-    conds.push(`${levelExpr(ctx.tenant)} IN (${levels.map(lit).join(', ')})`);
+  const levels = activeLevels(spec);
+  if (levels.length > 0) {
+    conds.push(`${opts.levelBy ?? levelExpr(ctx.tenant, ctx)} IN (${levels.map(lit).join(', ')})`);
   }
   spec.lineFilters.filter((f) => f.value !== '').forEach((f) => conds.push(lineFilterCond(f)));
   spec.fieldFilters.filter((f) => f.key !== '').forEach((f) => conds.push(fieldFilterCond(f)));
@@ -319,12 +441,58 @@ export function lineColumns(ctx: BuildContext): string[] {
   return Array.from(new Set([...ctx.labels, ...ctx.fields])).filter((c) => ctx.columns.includes(c) && !skip.has(c));
 }
 
+/** Columns read inside the top-N of a lines query: no expression, so nothing is computed for dropped rows. */
+function rawLineColumns(ctx: BuildContext, extra: string[] = []): string[] {
+  const level = ctx.columns.includes(LEVEL_COLUMN) || ctx.tenant.level.source === 'column' ? [LEVEL_COLUMN] : [];
+  return Array.from(new Set([TIME_COLUMN, MESSAGE_COLUMN, ...level, ...lineColumns(ctx), ...extra])).map(quoteIdent);
+}
+
+/**
+ * WHERE clauses of a lines query: one, or for a level filter on a "message" tenant with a level column, one per
+ * level source (column rows filtered on the column, the others on the message regexp; see levelSplit).
+ */
+function linesWheres(spec: QuerySpec, ctx: BuildContext, extra: string[]): string[] {
+  const split = levelSplit(ctx.tenant, ctx);
+  if (activeLevels(spec).length === 0 || split.length === 1) {
+    return [whereClause(spec, ctx, { extra })];
+  }
+  return split.map((p) => whereClause(spec, ctx, { before: [p.cond!], extra, levelBy: p.expr }));
+}
+
+/**
+ * Top-N lines: the newest (or oldest) rows on the raw columns, then the level (a regexp per line for "message"
+ * tenants), __ms and __ts computed on those rows only (UAT: 0.11 s for 1 h and 6 h, any range, with the time
+ * column untouched in WHERE and ORDER BY). Several WHERE branches are joined with UNION ALL, each with its own
+ * top-N, and cut to the top-N again.
+ */
+function topLines(
+  view: string,
+  ctx: BuildContext,
+  wheres: string[],
+  orderBy: string,
+  limit: number,
+  opts: { innerExtra?: string[]; outerExtra?: string[] } = {}
+): string {
+  const n = Math.max(1, Math.floor(limit));
+  const raw = rawLineColumns(ctx, opts.innerExtra).join(', ');
+  const branches = wheres.map((w) =>
+    [`SELECT ${raw}`, from(view), `WHERE ${w}`, `ORDER BY ${orderBy}`, `LIMIT ${n}`].join('\n')
+  );
+  const source = branches.length === 1 ? branches[0] : branches.map((b) => `(${b})`).join('\nUNION ALL\n');
+  return [
+    `SELECT ${[lineSelect(ctx), ...(opts.outerExtra ?? [])].join(', ')}`,
+    `FROM (\n${source}\n) l`,
+    `ORDER BY ${orderBy}`,
+    `LIMIT ${n}`,
+  ].join('\n');
+}
+
 function lineSelect(ctx: BuildContext): string {
   return [
     `${timeMsExpr(T)} AS __ms`,
     `CAST(${T} AS VARCHAR) AS __ts`,
     M,
-    `${levelExpr(ctx.tenant)} AS detected_level`,
+    `${levelExpr(ctx.tenant, ctx)} AS detected_level`,
     ...lineColumns(ctx).map(quoteIdent),
   ].join(', ');
 }
@@ -350,22 +518,25 @@ export function labelValuesQuery(spec: QuerySpec, ctx: BuildContext, key: string
   ].join('\n');
 }
 
-/** Service grid: counts per bucket, label value and level, all values in one scan. */
+/**
+ * Service grid: counts per bucket, label value and level, all values in one scan (two with a level split).
+ * `sample` keeps about 1 in n rows and multiplies the counts (for a level split from the message).
+ */
 export function serviceVolumeQuery(
   spec: QuerySpec,
   ctx: BuildContext,
   label: string,
   bucket: number,
-  withLevel = true
+  withLevel = true,
+  sample?: number
 ): string {
-  const lvl = withLevel ? levelExpr(ctx.tenant) : `'all'`;
-  return [
-    `SELECT ${bucketExpr(bucket)} AS t, ${quoteIdent(label)} AS v, ${lvl} AS lvl, COUNT(*) AS c`,
-    from(spec.view),
-    `WHERE ${whereClause(spec, ctx)}`,
-    `GROUP BY t, v, lvl`,
-    `ORDER BY t`,
-  ].join('\n');
+  return countByLevel(spec, ctx, {
+    select: [`${bucketExpr(bucket)} AS t`, `${quoteIdent(label)} AS v`],
+    groupBy: ['t', 'v'],
+    levelAlias: 'lvl',
+    withLevel,
+    sample,
+  });
 }
 
 /** Newest lines for each of the given label values, as one UNION ALL of top-N queries. */
@@ -378,14 +549,12 @@ export function serviceSamplesQuery(
 ): string {
   const col = quoteIdent(label);
   return values
-    .map((v) =>
-      [
-        `(SELECT ${lineSelect(ctx)}, ${col} AS __value`,
-        from(spec.view),
-        `WHERE ${whereClause(spec, ctx, { extra: [`${col} = ${lit(v)}`] })}`,
-        `ORDER BY ${T} DESC`,
-        `LIMIT ${Math.max(1, Math.floor(perValue))})`,
-      ].join('\n')
+    .map(
+      (v) =>
+        `(${topLines(spec.view, ctx, linesWheres(spec, ctx, [`${col} = ${lit(v)}`]), `${T} DESC`, perValue, {
+          innerExtra: [label],
+          outerExtra: [`${col} AS __value`],
+        })})`
     )
     .join('\nUNION ALL\n');
 }
@@ -398,25 +567,27 @@ export function logsQuery(
   bounds?: { fromMs: number; toMs: number }
 ): string {
   const extra = bounds ? preciseTimeBounds(bounds.fromMs, bounds.toMs) : [];
-  return [
-    `SELECT ${lineSelect(ctx)}`,
-    from(spec.view),
-    `WHERE ${whereClause(spec, ctx, { extra })}`,
-    `ORDER BY ${T} ${sort === 'asc' ? 'ASC' : 'DESC'}`,
-    `LIMIT ${Math.max(1, Math.floor(limit))}`,
-  ].join('\n');
+  return topLines(spec.view, ctx, linesWheres(spec, ctx, extra), `${T} ${sort === 'asc' ? 'ASC' : 'DESC'}`, limit);
 }
 
-/** Log volume by level for the Logs tab histogram ('all' when the level split is skipped). */
-export function volumeQuery(spec: QuerySpec, ctx: BuildContext, bucket: number, withLevel = true): string {
-  const lvl = withLevel ? levelExpr(ctx.tenant) : `'all'`;
-  return [
-    `SELECT ${bucketExpr(bucket)} AS t, ${lvl} AS g, COUNT(*) AS c`,
-    from(spec.view),
-    `WHERE ${whereClause(spec, ctx)}`,
-    `GROUP BY t, g`,
-    `ORDER BY t`,
-  ].join('\n');
+/**
+ * Log volume by level for the Logs tab histogram ('all' when the level split is skipped). `sample` keeps about 1
+ * in n rows and multiplies the counts.
+ */
+export function volumeQuery(
+  spec: QuerySpec,
+  ctx: BuildContext,
+  bucket: number,
+  withLevel = true,
+  sample?: number
+): string {
+  return countByLevel(spec, ctx, {
+    select: [`${bucketExpr(bucket)} AS t`],
+    groupBy: ['t'],
+    levelAlias: 'g',
+    withLevel,
+    sample,
+  });
 }
 
 /**
@@ -514,8 +685,10 @@ export function oldestInRangeQuery(view: string, fromMs: number, toMs: number): 
 }
 
 /**
- * Lines of the same pod before (backward) or after (forward) a line, within one hour. Uses the exact
- * microsecond timestamp of the line. Timestamps are not unique, so lines with the same timestamp are left out.
+ * Lines of the same pod before (backward) or after (forward) a line, within one hour, nearest first. Uses the
+ * exact microsecond timestamp of the line. Timestamps are not unique: on UAT 42 % of lines share their exact
+ * microsecond with another line of the same pod (always a different message), so lines are ordered by time,
+ * then message, and the lines tied with the anchor are on the right side of it.
  */
 export function contextQuery(
   view: string,
@@ -524,18 +697,24 @@ export function contextQuery(
   pod: string,
   tsRaw: string,
   direction: 'backward' | 'forward',
-  limit: number
+  limit: number,
+  message?: string
 ): string {
   const ts = `CAST(${lit(tsRaw)} AS DATETIME)`;
-  const range =
-    direction === 'backward'
-      ? `${T} < ${ts} AND ${T} >= DATE_SUB(${ts}, INTERVAL 1 HOUR)`
-      : `${T} > ${ts} AND ${T} <= DATE_ADD(${ts}, INTERVAL 1 HOUR)`;
-  return [
-    `SELECT ${lineSelect(ctx)}`,
-    from(view),
-    `WHERE ${quoteIdent(podColumn)} = ${lit(pod)} AND ${range}`,
-    `ORDER BY ${T} ${direction === 'backward' ? 'DESC' : 'ASC'}`,
-    `LIMIT ${Math.max(1, Math.floor(limit))}`,
-  ].join('\n');
+  const back = direction === 'backward';
+  const cmp = back ? '<' : '>';
+  const position =
+    message === undefined
+      ? `${T} ${cmp} ${ts}`
+      : `(${T} ${cmp} ${ts} OR (${T} = ${ts} AND ${M} ${cmp} ${lit(message)}))`;
+  const bound = back ? `${T} >= DATE_SUB(${ts}, INTERVAL 1 HOUR)` : `${T} <= DATE_ADD(${ts}, INTERVAL 1 HOUR)`;
+  const dir = back ? 'DESC' : 'ASC';
+  return topLines(
+    view,
+    ctx,
+    [`${quoteIdent(podColumn)} = ${lit(pod)} AND ${position} AND ${bound}`],
+    `${T} ${dir}${message === undefined ? '' : `, ${M} ${dir}`}`,
+    limit,
+    { innerExtra: [podColumn] }
+  );
 }

@@ -1,5 +1,5 @@
 import { css } from '@emotion/css';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { GrafanaTheme2, dateTimeFormat, rangeUtil } from '@grafana/data';
 import {
@@ -15,7 +15,19 @@ import {
   SceneTimePicker,
   sceneGraph,
 } from '@grafana/scenes';
-import { Alert, Button, IconButton, InlineField, Select, Tab, TabsBar, Tooltip, useStyles2 } from '@grafana/ui';
+import {
+  Alert,
+  Button,
+  Icon,
+  IconButton,
+  InlineField,
+  Select,
+  Spinner,
+  Tab,
+  TabsBar,
+  Tooltip,
+  useStyles2,
+} from '@grafana/ui';
 
 import { LEVELS, QUICK_RANGES, RUNTIME_DS } from '../constants';
 import { getAppConfig, getAppConfigErrors, viewPrefixFor } from '../config/config';
@@ -47,13 +59,18 @@ import {
 import { Display, displayLabel, ExplorationApi, isExplorationApi, Tab as TabName } from './api';
 import { BreakdownScene, MESSAGE_FIELD_PREFIX } from './BreakdownScene';
 import { quickRangeMs } from '../state/timeRange';
+import { CappedTimeRange, cappedOf } from './CappedTimeRange';
 import { DetailsHeader } from './FiltersBar';
 import { LogsTabScene } from './LogsTabScene';
 import { PatternsTabScene } from './PatternsTabScene';
 import { ServiceSelectionScene } from './ServiceSelectionScene';
-import { ErrorBox, Loading, ScanGuard } from './ui';
+import { Elapsed, ErrorBox, Loading, ScanGuard } from './ui';
 
 type AdHocFilter = AdHocFiltersVariable['state']['filters'][number];
+
+// level split from the message over more than this many hours is counted on a 1-in-LEVEL_SAMPLE hash sample
+export const LEVEL_SAMPLE_ABOVE_HOURS = 1;
+export const LEVEL_SAMPLE = 10;
 type Page = 'selection' | 'details';
 
 export interface LogsExplorationState extends SceneObjectState {
@@ -88,6 +105,8 @@ export interface LogsExplorationState extends SceneObjectState {
   search: string;
   /** time range (raw from|to) for which the user accepted a long text scan */
   scanAllowedFor?: string;
+  /** service grid of a tenant whose level comes from the message: split the volumes by level (on request) */
+  gridLevels: boolean;
   /** oldest line of the selected view ("Oldest log"), looked up in the background */
   oldest?: { key: string; ms?: number | null; loading?: boolean; error?: string };
   body?: SceneObject;
@@ -113,6 +132,7 @@ const URL_KEYS = [
   'display',
   'wrap',
   'search',
+  'levelsplit',
 ];
 const TABS: TabName[] = ['logs', 'labels', 'fields', 'patterns'];
 // =| and !=| (one of / not one of) are expanded to several = / != filters
@@ -201,6 +221,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       display: 'logs',
       wrap: false,
       search: '',
+      gridLevels: false,
       controls: [
         new SceneTimePicker({
           quickRanges: QUICK_RANGES.filter(
@@ -263,6 +284,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       display: s.display === 'logs' ? null : s.display,
       wrap: s.wrap ? '1' : null,
       search: s.search !== '' ? s.search : null,
+      levelsplit: s.gridLevels ? '1' : null,
     };
   }
 
@@ -325,6 +347,9 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     }
     if ('wrap' in values) {
       next.wrap = one('wrap') === '1';
+    }
+    if ('levelsplit' in values) {
+      next.gridLevels = one('levelsplit') === '1';
     }
     if ('search' in values) {
       next.search = one('search') ?? '';
@@ -753,7 +778,29 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
   }
 
   private computeGuardSignature(): string {
-    return `${this.rangeBlocked()}`;
+    return `${this.rangeBlocked()}|${this.rangeHours() > LEVEL_SAMPLE_ABOVE_HOURS}`;
+  }
+
+  /**
+   * How volumes get their level. Tenants with a level column: exact, always (cheap). Tenants whose level is
+   * read from the message (a regexp per line, 92 % of the query time on UAT): the service grid shows plain
+   * volumes unless the user asks for levels; with levels, ranges over an hour are counted on a 10 % hash sample
+   * (about 4 times faster, counts multiplied by 10).
+   */
+  levelPlan(forGrid: boolean): { withLevel: boolean; sample?: number } {
+    const tenant = this.state.ctx?.tenant;
+    if (!tenant || tenant.level.source === 'column') {
+      return { withLevel: true };
+    }
+    if (forGrid && !this.state.gridLevels) {
+      return { withLevel: false };
+    }
+    return { withLevel: true, sample: this.rangeHours() > LEVEL_SAMPLE_ABOVE_HOURS ? LEVEL_SAMPLE : undefined };
+  }
+
+  setGridLevels(on: boolean) {
+    this.setState({ gridLevels: on });
+    this.rebuild();
   }
 
   rebuild() {
@@ -821,7 +868,8 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     const spec = this.getSpec();
     const tenant = s.ctx.tenant;
     const blocked = this.rangeBlocked();
-    const levelSkipped = blocked && tenant.level.source === 'message';
+    const gridLevel = this.levelPlan(true);
+    const tabLevel = this.levelPlan(false);
     const textScan = needsMessageScan(spec, tenant, false);
 
     if (!this.isDetails()) {
@@ -829,8 +877,9 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
         spec: this.selectionSpec(),
         label: this.primaryLabel(),
         search: s.search,
-        withLevel: !levelSkipped,
-        levelNotice: levelSkipped,
+        withLevel: gridLevel.withLevel,
+        sample: gridLevel.sample,
+        levelFromMessage: tenant.level.source === 'message',
       });
     }
     const reason =
@@ -842,7 +891,8 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
         // (which reads every line) waits for the user
         return new LogsTabScene({
           spec,
-          withLevel: !levelSkipped,
+          withLevel: tabLevel.withLevel,
+          sample: tabLevel.sample,
           volumeDeferred: blocked && textScan,
           display,
           sort,
@@ -890,36 +940,16 @@ function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>
           </ul>
         </Alert>
       )}
+      {/* row 1: label filters left; data source, view, time and refresh right. Nothing here changes width
+          between pages, so the pickers never move. */}
       <div className={styles.header}>
         <div className={styles.left}>
           <div className={styles.caption}>Labels</div>
-          <div className={styles.filterRow}>
-            <div className={styles.filters} data-testid="label-filters">
-              <labelFilters.Component model={labelFilters} />
-            </div>
-            {details ? (
-              <Button
-                variant="secondary"
-                icon="arrow-left"
-                onClick={() => model.backToSelection()}
-                data-testid="back-to-services"
-              >
-                Back to {displayLabel(model.primaryLabel())} values
-              </Button>
-            ) : (
-              <Button
-                variant={filters.length > 0 ? 'primary' : 'secondary'}
-                fill="outline"
-                onClick={() => model.showLogs()}
-                data-testid="show-logs"
-              >
-                Show logs
-              </Button>
-            )}
+          <div className={styles.filters} data-testid="label-filters">
+            <labelFilters.Component model={labelFilters} />
           </div>
         </div>
         <div className={styles.right}>
-          <OldestLog model={model} />
           <InlineField label="Data source">
             <Select
               width={22}
@@ -951,6 +981,39 @@ function LogsExplorationRenderer({ model }: SceneComponentProps<LogsExploration>
           {controls.map((c) => (
             <c.Component key={c.state.key} model={c} />
           ))}
+        </div>
+      </div>
+
+      {/* row 2: where you are (Show logs / Back) on the left; status on the right (range notice, loading, oldest log) */}
+      <div className={styles.bar} data-testid="page-bar">
+        <div className={styles.barLeft}>
+          {details ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              icon="arrow-left"
+              onClick={() => model.backToSelection()}
+              data-testid="back-to-services"
+            >
+              Back to {displayLabel(model.primaryLabel())} values
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant={filters.length > 0 ? 'primary' : 'secondary'}
+              fill="outline"
+              icon="arrow-right"
+              onClick={() => model.showLogs()}
+              data-testid="show-logs"
+            >
+              Show logs{filters.length > 0 ? ' of the current filters' : ''}
+            </Button>
+          )}
+        </div>
+        <div className={styles.barRight}>
+          <RangeNotice model={model} />
+          <RunningIndicator model={model} />
+          <OldestLog model={model} />
         </div>
       </div>
 
@@ -1008,11 +1071,74 @@ function OldestLog({ model }: { model: LogsExploration }) {
       : `Looking up the oldest line in ${view}`;
   return (
     <Tooltip content={tip}>
-      <div className={styles.oldest} data-testid="oldest-log">
-        <span className={styles.oldestLabel}>Oldest log</span>
-        <span>{text}</span>
-      </div>
+      <span className={styles.oldest} data-testid="oldest-log">
+        <span className={styles.oldestLabel}>Oldest log</span> <span>{text}</span>
+      </span>
     </Tooltip>
+  );
+}
+
+/** "Loading… 12 s  Cancel" while any query of the page runs (from the scene's query controller). */
+function RunningIndicator({ model }: { model: LogsExploration }) {
+  const controller = sceneGraph.getQueryController(model);
+  return controller ? <RunningIndicatorInner controller={controller} /> : null;
+}
+
+function RunningIndicatorInner({
+  controller,
+}: {
+  controller: NonNullable<ReturnType<typeof sceneGraph.getQueryController>>;
+}) {
+  const styles = useStyles2(getStyles);
+  const { isRunning } = controller.useState();
+  if (!isRunning) {
+    return null;
+  }
+  return (
+    <span className={styles.running} data-testid="running-indicator">
+      <Spinner inline />
+      Loading
+      <Elapsed />
+      <Button
+        size="sm"
+        fill="text"
+        variant="secondary"
+        onClick={() => controller.cancelAll()}
+        data-testid="cancel-queries"
+      >
+        Cancel
+      </Button>
+    </span>
+  );
+}
+
+/** "Time range limited to 24 hours", under the header (a toast would cover the time picker). Hides after 20 s. */
+function RangeNotice({ model }: { model: LogsExploration }) {
+  const styles = useStyles2(getStyles);
+  const timeRange = sceneGraph.getTimeRange(model);
+  const state = timeRange.useState();
+  const capped = cappedOf(state);
+  const dismiss = useCallback(() => {
+    if (timeRange instanceof CappedTimeRange) {
+      timeRange.dismissCapped();
+    }
+  }, [timeRange]);
+  useEffect(() => {
+    if (!capped) {
+      return;
+    }
+    const timer = setTimeout(dismiss, 20_000);
+    return () => clearTimeout(timer);
+  }, [capped, dismiss]);
+  if (!capped) {
+    return null;
+  }
+  return (
+    <span className={styles.notice} data-testid="range-capped" role="status">
+      <Icon name="info-circle" />
+      Time range limited to {capped.hours} hours: showing the last {capped.hours} hours of your selection.
+      <IconButton name="times" size="sm" aria-label="Dismiss" onClick={dismiss} />
+    </span>
   );
 }
 
@@ -1136,8 +1262,7 @@ const getStyles = (theme: GrafanaTheme2) => ({
     minWidth: 'min-content',
   }),
   caption: css({ fontSize: theme.typography.bodySmall.fontSize, color: theme.colors.text.secondary }),
-  filterRow: css({ display: 'flex', alignItems: 'center', gap: theme.spacing(1) }),
-  filters: css({ flex: 1, minWidth: 280, maxWidth: 900 }),
+  filters: css({ minWidth: 280, maxWidth: 900 }),
   // stays right-aligned when a narrow window wraps it under the label filters
   right: css({
     display: 'flex',
@@ -1147,14 +1272,41 @@ const getStyles = (theme: GrafanaTheme2) => ({
     flexWrap: 'wrap',
     marginLeft: 'auto',
   }),
-  addLabel: css({ marginLeft: theme.spacing(1), alignSelf: 'center' }),
-  oldest: css({
+  bar: css({
     display: 'flex',
-    flexDirection: 'column',
-    lineHeight: 1.2,
-    fontSize: theme.typography.bodySmall.fontSize,
-    whiteSpace: 'nowrap',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.spacing(2),
+    flexWrap: 'wrap',
+    minHeight: 32,
   }),
+  barLeft: css({ display: 'flex', alignItems: 'center', gap: theme.spacing(1) }),
+  barRight: css({
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: theme.spacing(2),
+    flexWrap: 'wrap',
+    marginLeft: 'auto',
+    fontSize: theme.typography.bodySmall.fontSize,
+  }),
+  running: css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: theme.spacing(0.5),
+    color: theme.colors.text.secondary,
+  }),
+  notice: css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: theme.spacing(0.5),
+    padding: theme.spacing(0.25, 0.5, 0.25, 1),
+    borderRadius: theme.shape.radius.default,
+    background: theme.colors.info.transparent,
+    color: theme.colors.text.primary,
+  }),
+  addLabel: css({ marginLeft: theme.spacing(1), alignSelf: 'center' }),
+  oldest: css({ whiteSpace: 'nowrap', color: theme.colors.text.primary }),
   oldestLabel: css({ color: theme.colors.text.secondary }),
   body: css({ paddingTop: theme.spacing(1), minWidth: 0 }),
 });

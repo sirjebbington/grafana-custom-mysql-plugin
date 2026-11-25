@@ -10,14 +10,14 @@ import {
   VizPanel,
   sceneGraph,
 } from '@grafana/scenes';
-import { Alert, Button, Icon, IconButton, Pagination, Select, Tooltip, useStyles2 } from '@grafana/ui';
+import { Button, Icon, IconButton, InlineSwitch, Pagination, Select, Spinner, Tooltip, useStyles2 } from '@grafana/ui';
 
 import { runLogsQuery } from '../datasource/StarRocksLogsDataSource';
 import { getFavorites, toggleFavorite } from '../state/storage';
 import { QuerySpec } from '../state/types';
 import { displayLabel, getExploration } from './api';
 import { barsPanel, queryRunner, staticData } from './panels';
-import { ErrorBox, Loading, SampleList } from './ui';
+import { Elapsed, ErrorBox, SampleList } from './ui';
 
 interface ServiceValue {
   value: string;
@@ -30,7 +30,10 @@ export interface ServiceSelectionState extends SceneObjectState {
   label: string;
   search: string;
   withLevel: boolean;
-  levelNotice: boolean;
+  /** keep about 1 in n rows (hash sample) for the level split; counts are multiplied by n */
+  sample?: number;
+  /** the tenant's level is read from the message (slow): levels are shown on request */
+  levelFromMessage: boolean;
   page: number;
   pageSize: number;
   values?: ServiceValue[];
@@ -65,7 +68,11 @@ export class ServiceSelectionScene extends SceneObjectBase<ServiceSelectionState
       panels: [],
       samples: {},
       favorites: getFavorites(state.spec.datasource, state.spec.view, state.label),
-      $data: queryRunner('serviceVolume', state.spec, { label: state.label, withLevel: state.withLevel }),
+      $data: queryRunner('serviceVolume', state.spec, {
+        label: state.label,
+        withLevel: state.withLevel,
+        sample: state.sample,
+      }),
       ...state,
     });
     this.addActivationHandler(() => {
@@ -188,7 +195,7 @@ export class ServiceSelectionScene extends SceneObjectBase<ServiceSelectionState
 }
 
 /** Buttons in a row's header: favourite, Include / Remove (label filter), Show logs. */
-function RowActions({ scene, value }: { scene: ServiceSelectionScene; value: string }) {
+export function RowActions({ scene, value }: { scene: ServiceSelectionScene; value: string }) {
   const styles = useStyles2(getStyles);
   const api = getExploration(scene);
   const { label, favorites } = scene.useState();
@@ -228,15 +235,33 @@ function RowActions({ scene, value }: { scene: ServiceSelectionScene; value: str
   );
 }
 
+/** "Loading volumes… 12 s" with placeholder rows, so a slow first load does not look like an empty page. */
+function LoadingRows({ text }: { text: string }) {
+  const styles = useStyles2(getStyles);
+  return (
+    <div data-testid="grid-loading">
+      <div className={styles.loadingText}>
+        <Spinner inline /> {text}
+        <Elapsed />
+      </div>
+      {[0, 1, 2].map((i) => (
+        <div key={i} className={styles.placeholderRow} />
+      ))}
+    </div>
+  );
+}
+
 function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectionScene>) {
   const styles = useStyles2(getStyles);
-  const { panels, samples, samplesLoading, samplesError, search, page, pageSize, label, levelNotice, $data } =
+  const { panels, samples, samplesLoading, samplesError, search, page, pageSize, label, $data, levelFromMessage } =
     model.useState();
+  const { withLevel, sample } = model.useState();
   const data = $data.useState().data;
   const filtered = model.filtered();
   const visible = model.visible();
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const name = displayLabel(label);
+  const api = getExploration(model);
 
   const header = (
     <div className={styles.header}>
@@ -255,10 +280,10 @@ function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectio
           inputValue={search}
           onInputChange={(text, meta) => {
             if (meta.action === 'input-change') {
-              getExploration(model).setSearch(text);
+              api.setSearch(text);
             }
           }}
-          onChange={(o) => getExploration(model).setSearch(o?.value ?? '')}
+          onChange={(o) => api.setSearch(o?.value ?? '')}
           noOptionsMessage={`No ${name} values match`}
         />
       </div>
@@ -276,7 +301,7 @@ function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectio
           <Icon name="info-circle" className={styles.muted} />
         </Tooltip>
       </span>
-      <div className={styles.pagination}>
+      <div className={styles.pagination} data-testid="grid-pagination">
         <Pagination
           currentPage={page + 1}
           numberOfPages={pages}
@@ -284,6 +309,28 @@ function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectio
           hideWhenSinglePage
         />
       </div>
+      {levelFromMessage && (
+        <div className={styles.levels}>
+          <InlineSwitch
+            label="Split by level"
+            showLabel
+            value={withLevel}
+            onChange={() => api.setGridLevels(!withLevel)}
+            data-testid="grid-levels"
+          />
+          <Tooltip
+            content={
+              withLevel && sample
+                ? `Levels are read from the message text, a regexp per line. To stay fast over this range the counts per level are estimated from about 1 in ${sample} lines.`
+                : 'This tenant has no level column: levels are read from the message text, which is slow for every service at once. Turn on to see them anyway.'
+            }
+          >
+            <span className={styles.muted}>
+              {withLevel && sample ? `≈ estimated (1 in ${sample} lines)` : <Icon name="info-circle" />}
+            </span>
+          </Tooltip>
+        </div>
+      )}
     </div>
   );
 
@@ -291,27 +338,24 @@ function ServiceSelectionRenderer({ model }: SceneComponentProps<ServiceSelectio
     return (
       <div>
         {header}
-        <Loading text="Loading volumes…" />
+        <LoadingRows text={`Loading ${name} volumes…`} />
       </div>
     );
   }
   if (data.state === LoadingState.Error) {
     return (
-      <ErrorBox
-        title={`Could not load the ${name} volumes`}
-        error={data.errors?.[0]?.message ?? data.error?.message ?? 'error'}
-      />
+      <div>
+        {header}
+        <ErrorBox
+          title={`Could not load the ${name} volumes`}
+          error={data.errors?.[0]?.message ?? data.error?.message ?? 'error'}
+        />
+      </div>
     );
   }
   return (
     <div>
       {header}
-      {levelNotice && (
-        <Alert severity="info" title="Volumes are not split by level for this range">
-          This tenant&apos;s level is read from the message text, which is slow over long ranges. Shorten the range to
-          see levels.
-        </Alert>
-      )}
       {filtered.length === 0 && (
         <div className={styles.muted}>
           {search !== '' ? `No ${name} values match "${search}".` : 'No logs in the selected time range.'}
@@ -353,7 +397,23 @@ const getStyles = (theme: GrafanaTheme2) => ({
     color: theme.colors.text.secondary,
     whiteSpace: 'nowrap',
   }),
-  pagination: css({ marginLeft: 'auto' }),
+  // right after "Showing N of M", not at the far edge
+  pagination: css({ display: 'flex', alignItems: 'center' }),
+  levels: css({ display: 'inline-flex', alignItems: 'center', gap: theme.spacing(1), marginLeft: 'auto' }),
+  loadingText: css({
+    display: 'flex',
+    alignItems: 'center',
+    gap: theme.spacing(1),
+    color: theme.colors.text.secondary,
+    margin: theme.spacing(1, 0),
+  }),
+  placeholderRow: css({
+    height: 220,
+    marginBottom: theme.spacing(1),
+    borderRadius: theme.shape.radius.default,
+    background: theme.colors.background.secondary,
+    opacity: 0.6,
+  }),
   footer: css({ display: 'flex', justifyContent: 'flex-end', marginTop: theme.spacing(1) }),
   muted: css({ color: theme.colors.text.secondary }),
   actions: css({ display: 'inline-flex', alignItems: 'center', gap: theme.spacing(1) }),

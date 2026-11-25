@@ -1,5 +1,5 @@
 import { css } from '@emotion/css';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 import { DataFrame, GrafanaTheme2, LoadingState, dateTimeFormat, urlUtil } from '@grafana/data';
 import { config as grafanaConfig } from '@grafana/runtime';
@@ -13,7 +13,6 @@ import {
   sceneGraph,
 } from '@grafana/scenes';
 import {
-  Alert,
   Button,
   ClipboardButton,
   Icon,
@@ -33,12 +32,16 @@ import { withQueryHint } from '../sql/builder';
 import { extractMessageFields } from '../patterns/messageFields';
 import { QuerySpec } from '../state/types';
 import { Display, getExploration } from './api';
+import { getVolumeVisible, setVolumeVisible } from '../state/storage';
+import { useFillHeight } from './layout';
 import { barsPanel, logsPanel, queryRunner, tablePanel } from './panels';
 import { ErrorBox, Loading } from './ui';
 
 export interface LogsTabState extends SceneObjectState {
   spec: QuerySpec;
   withLevel: boolean;
+  /** level split estimated from about 1 in n lines (message-level tenants over more than an hour) */
+  sample?: number;
   /**
    * text search over more than maxScanHours: the volume chart (which has to read every line in the range) is
    * loaded on request; the lines are searched newest first and stop at the line limit
@@ -50,6 +53,8 @@ export interface LogsTabState extends SceneObjectState {
   wrap: boolean;
   volume?: VizPanel;
   main?: SceneObject;
+  /** the first lines are in: the volume chart may start */
+  volumeReady?: boolean;
 }
 
 /** Logs tab: volume histogram by level and the lines as Logs, Table or JSON. */
@@ -57,6 +62,8 @@ export class LogsTabScene extends SceneObjectBase<LogsTabState> {
   static Component = LogsTabRenderer;
   /** query of the lines (owned by the panel); its progress is shown above the lines */
   private linesRunner?: SceneQueryRunner;
+  /** query of the volume chart (owned by its panel), for the loading badge */
+  private volumeRunner?: SceneQueryRunner;
 
   constructor(state: LogsTabState) {
     super(state);
@@ -64,13 +71,49 @@ export class LogsTabScene extends SceneObjectBase<LogsTabState> {
       if (!this.state.main) {
         this.build();
       }
+      return this.startVolumeAfterLines();
     });
   }
 
+  /**
+   * The volume chart reads every line in the range; the list is a cheap top-N. The chart starts once the first
+   * lines are in (or the list failed), so the two do not compete for the backend (UAT: one backend, DOP 3) and
+   * the lines show first, as in the internal UI. Later refreshes run both together.
+   */
+  private startVolumeAfterLines(): (() => void) | undefined {
+    const runner = this.linesRunner;
+    if (this.state.volumeReady || !runner) {
+      return undefined;
+    }
+    const arrived = () => {
+      const data = runner.state.data;
+      return data !== undefined && data.state !== LoadingState.Loading;
+    };
+    if (arrived()) {
+      this.setState({ volumeReady: true });
+      return undefined;
+    }
+    const sub = runner.subscribeToState(() => {
+      if (arrived()) {
+        sub.unsubscribe();
+        this.setState({ volumeReady: true });
+      }
+    });
+    return () => sub.unsubscribe();
+  }
+
   private build() {
-    const { spec, withLevel, display, sort, limit, wrap, volumeDeferred } = this.state;
+    const { spec, withLevel, sample, display, sort, limit, wrap, volumeDeferred } = this.state;
     const api = getExploration(this);
-    const volume = volumeDeferred ? undefined : barsPanel('Log volume', queryRunner('volume', spec, { withLevel }));
+    const volumeRunner = volumeDeferred ? undefined : queryRunner('volume', spec, { withLevel, sample });
+    const volume = volumeRunner
+      ? barsPanel(sample ? `Log volume (≈ estimated from 1 in ${sample} lines)` : 'Log volume', volumeRunner, {
+          description: sample
+            ? 'This tenant has no level column: levels are read from the message text. Over this range the counts per level are estimated from a hash sample of the lines and multiplied back.'
+            : undefined,
+        })
+      : undefined;
+    this.volumeRunner = volumeRunner;
     let main: SceneObject;
     const lines = queryRunner(display === 'table' ? 'table' : 'logs', spec, { limit, sort });
     if (display === 'table') {
@@ -91,6 +134,10 @@ export class LogsTabScene extends SceneObjectBase<LogsTabState> {
 
   getLinesRunner(): SceneQueryRunner | undefined {
     return this.linesRunner;
+  }
+
+  getVolumeRunner(): SceneQueryRunner | undefined {
+    return this.volumeRunner;
   }
 
   exploreUrl(): string | undefined {
@@ -142,7 +189,7 @@ const SORTS: Array<{ label: string; value: 'desc' | 'asc' }> = [
   { label: 'Oldest first', value: 'asc' },
 ];
 
-function formatSpan(ms: number): string {
+export function formatSpan(ms: number): string {
   const minutes = Math.round(ms / 60_000);
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
@@ -215,29 +262,54 @@ function DeferredVolume({ model }: { model: LogsTabScene }) {
   );
 }
 
+/** "Loading…" badge over a panel while its query runs (the panels alone show an empty box or old data). */
+function LoadingBadge({ runner, text }: { runner?: SceneQueryRunner; text: string }) {
+  if (!runner) {
+    return null;
+  }
+  return <LoadingBadgeInner runner={runner} text={text} />;
+}
+
+function LoadingBadgeInner({ runner, text }: { runner: SceneQueryRunner; text: string }) {
+  const styles = useStyles2(getStyles);
+  const { data } = runner.useState();
+  const loading = !data || data.state === LoadingState.Loading;
+  if (!loading) {
+    return null;
+  }
+  const empty = !data || data.series.every((f) => f.length === 0);
+  return (
+    <div className={empty ? styles.badgeCenter : styles.badgeCorner} data-testid="panel-loading">
+      <Spinner inline /> {text}
+    </div>
+  );
+}
+
 function LogsTabRenderer({ model }: SceneComponentProps<LogsTabScene>) {
   const styles = useStyles2(getStyles);
-  const { volume, main, display, sort, limit, wrap, withLevel, volumeDeferred } = model.useState();
+  const { volume, main, display, sort, limit, wrap, volumeDeferred, volumeReady } = model.useState();
   const api = getExploration(model);
-  const ctx = api.getContext();
-  const levelSkipped = !volumeDeferred && !withLevel && ctx?.tenant.level.source === 'message';
   const runner = main ? model.getLinesRunner() : undefined;
+  const ref = useRef<HTMLDivElement>(null);
+  // the tab fills the window below the header; the lines scroll inside their panel, not the page
+  const height = useFillHeight(ref);
+  const [showVolume, setShowVolume] = useState(() => getVolumeVisible());
+  const toggleVolume = () => {
+    setVolumeVisible(!showVolume);
+    setShowVolume(!showVolume);
+  };
 
   return (
-    <div className={styles.wrapper}>
-      {levelSkipped && (
-        <Alert severity="info" title="Log volume is not split by level for this range">
-          This tenant&apos;s level is read from the message text, which needs a full scan over more than{' '}
-          {getAppConfig().maxScanHours} hours.{' '}
-          <Button size="sm" variant="secondary" onClick={() => api.allowLongScan()}>
-            Split by level anyway
-          </Button>
-        </Alert>
-      )}
+    <div className={styles.wrapper} ref={ref} style={height ? { height } : undefined} data-testid="logs-tab">
       {volumeDeferred ? (
         <DeferredVolume model={model} />
       ) : (
-        <div className={styles.volume}>{volume && <volume.Component model={volume} />}</div>
+        showVolume && (
+          <div className={styles.volume} data-testid="volume-panel">
+            {volume && volumeReady && <volume.Component model={volume} />}
+            <LoadingBadge runner={model.getVolumeRunner()} text="Loading log volume…" />
+          </div>
+        )
       )}
       <div className={styles.toolbar}>
         <RadioButtonGroup size="sm" options={SORTS} value={sort} onChange={(v) => api.setDisplay({ sort: v })} />
@@ -257,6 +329,15 @@ function LogsTabRenderer({ model }: SceneComponentProps<LogsTabScene>) {
         {display === 'logs' && (
           <InlineSwitch label="Wrap lines" showLabel value={wrap} onChange={() => api.setDisplay({ wrap: !wrap })} />
         )}
+        {!volumeDeferred && (
+          <InlineSwitch
+            label="Volume"
+            showLabel
+            value={showVolume}
+            onChange={toggleVolume}
+            data-testid="toggle-volume"
+          />
+        )}
         <div className={styles.spacer} />
         <LinkButton
           size="sm"
@@ -275,6 +356,7 @@ function LogsTabRenderer({ model }: SceneComponentProps<LogsTabScene>) {
       {runner && <SearchStatus runner={runner} sort={sort} />}
       <div className={styles.main} data-testid="logs-main">
         {main && <main.Component model={main} />}
+        <LoadingBadge runner={runner} text="Loading lines…" />
       </div>
     </div>
   );
@@ -287,7 +369,8 @@ export class JsonLogsScene extends SceneObjectBase<JsonLogsState> {
   static Component = JsonLogsRenderer;
 }
 
-function rowsOf(frame?: DataFrame) {
+/** Rows of the JSON view: a JSON message stays an object, a logfmt one gets its key=value fields. */
+export function rowsOf(frame?: DataFrame) {
   if (!frame) {
     return [];
   }
@@ -346,8 +429,8 @@ function JsonLogsRenderer({ model }: SceneComponentProps<JsonLogsScene>) {
 }
 
 const getStyles = (theme: GrafanaTheme2) => ({
-  wrapper: css({ display: 'flex', flexDirection: 'column', gap: theme.spacing(1), minWidth: 0 }),
-  volume: css({ height: 200 }),
+  wrapper: css({ display: 'flex', flexDirection: 'column', gap: theme.spacing(1), minWidth: 0, minHeight: 0 }),
+  volume: css({ height: 150, flex: '0 0 auto', position: 'relative' }),
   deferred: css({
     display: 'flex',
     alignItems: 'center',
@@ -356,6 +439,7 @@ const getStyles = (theme: GrafanaTheme2) => ({
     border: `1px dashed ${theme.colors.border.medium}`,
     borderRadius: theme.shape.radius.default,
     color: theme.colors.text.secondary,
+    flex: '0 0 auto',
   }),
   status: css({
     display: 'flex',
@@ -363,10 +447,36 @@ const getStyles = (theme: GrafanaTheme2) => ({
     gap: theme.spacing(1),
     color: theme.colors.text.secondary,
     fontSize: theme.typography.bodySmall.fontSize,
+    flex: '0 0 auto',
   }),
   toolbar: css({ display: 'flex', alignItems: 'center', gap: theme.spacing(1), flexWrap: 'wrap' }),
   spacer: css({ flex: 1 }),
-  main: css({ height: 'calc(100vh - 320px)', minHeight: 480, minWidth: 0 }),
+  // fills what is left of the tab's height; the Logs panel scrolls inside it
+  main: css({ flex: '1 1 auto', minHeight: 320, minWidth: 0, position: 'relative' }),
+  badgeCenter: css({
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: theme.spacing(1),
+    color: theme.colors.text.secondary,
+    pointerEvents: 'none',
+  }),
+  badgeCorner: css({
+    position: 'absolute',
+    top: theme.spacing(0.5),
+    right: theme.spacing(5),
+    display: 'flex',
+    alignItems: 'center',
+    gap: theme.spacing(0.5),
+    padding: theme.spacing(0.25, 1),
+    borderRadius: theme.shape.radius.default,
+    background: theme.colors.background.secondary,
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
+    pointerEvents: 'none',
+  }),
   json: css({ height: '100%', overflow: 'auto' }),
   jsonRow: css({ borderBottom: `1px solid ${theme.colors.border.weak}`, padding: theme.spacing(0.5, 0) }),
 });

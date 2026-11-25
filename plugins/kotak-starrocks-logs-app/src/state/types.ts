@@ -62,6 +62,8 @@ export interface QueryParams {
   topN?: number;
   /** volume queries: split by level (false skips the message scan for message-derived levels) */
   withLevel?: boolean;
+  /** volume queries: keep about 1 in n rows (hash sample) and multiply the counts */
+  sample?: number;
 }
 
 export function emptySpec(view: string, datasource = ''): QuerySpec {

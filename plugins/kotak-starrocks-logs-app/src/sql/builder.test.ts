@@ -100,11 +100,16 @@ describe('level expression', () => {
     expect(levelExpr(c.tenant)).toContain("ELSE 'unknown' END");
   });
 
-  it('extracts the level from the message with the default regexes for message tenants', () => {
-    const expr = levelExpr(ctx().tenant);
+  it('message tenants: the level column where the pipeline filled it, else the message (default regexes)', () => {
+    const c = ctx();
+    const expr = levelExpr(c.tenant, c);
+    expect(expr).toContain("CASE WHEN trim(`level`) != '' THEN lower(trim(`level`)) ELSE lower(coalesce(");
     expect(expr).toContain('regexp_extract(`message`');
-    expect(expr).toContain('FATAL|ERROR|WARN');
-    expect(expr).not.toContain('`level`');
+    expect(expr).toContain('FATAL|ERROR|ERRO|WARN');
+    // a view without the level column: message only
+    const noLevel = levelExpr(c.tenant, { columns: c.columns.filter((x) => x !== 'level') });
+    expect(noLevel).not.toContain('`level`');
+    expect(noLevel).toContain('regexp_extract(`message`');
   });
 });
 

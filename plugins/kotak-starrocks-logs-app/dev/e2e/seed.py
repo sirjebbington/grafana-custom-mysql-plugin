@@ -242,6 +242,25 @@ def view_select():
     return ", ".join(f"{expr} AS observed_timestamp" if c == "observed_timestamp" else c for c in COLUMNS)
 
 
+TIE_POD_UID = "00000000-0000-0000-0000-0000000071e5"
+
+
+def tie_rows(template):
+    """Lines of one pod sharing an exact microsecond (42 % of UAT lines have such a twin): two at T, one just
+    before and one just after, so "show context" ordering by time then message can be tested."""
+    t = NOW - dt.timedelta(minutes=20)
+    out = []
+    for offset, message in ((-1, "tie before"), (0, "tie line A"), (0, "tie line B"), (1, "tie after")):
+        r = list(template)
+        ts = t + dt.timedelta(microseconds=offset)
+        r[COLUMNS.index("k8s_pod_uid")] = TIE_POD_UID
+        r[COLUMNS.index("k8s_pod_name")] = "tie-pod-0"
+        r[COLUMNS.index("message")] = message
+        r[COLUMNS.index("observed_timestamp")] = ts.strftime("%Y-%m-%d %H:%M:%S.%f")
+        out.append(r)
+    return out
+
+
 def main():
     w = sys.stdout.write
     w(f"SET GLOBAL time_zone = {q(FE_TIME_ZONE)};\n")
@@ -255,6 +274,8 @@ def main():
           "DISTRIBUTED BY HASH(app_id) BUCKETS 3 PROPERTIES (\"replication_num\" = \"1\");\n")
         for app_id, spec in tenants.items():
             rows = rows_for(app_id, spec)
+            if db == "obs2_logs1_uat" and app_id == "app_1961_observability":
+                rows += tie_rows(rows[0])
             for i in range(0, len(rows), 2000):
                 batch = rows[i:i + 2000]
                 w("INSERT INTO eks_app_logs VALUES\n" + ",\n".join("(" + ", ".join(q(v) for v in r) + ")" for r in batch) + ";\n")
