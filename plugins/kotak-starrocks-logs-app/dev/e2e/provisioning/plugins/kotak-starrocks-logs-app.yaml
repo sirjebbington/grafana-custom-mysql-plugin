@@ -11,7 +11,7 @@ apps:
     datasources:
     - e2e-ds-starrocks-logs
     - e2e-ds-starrocks-logs2
-    viewPrefix: vw_eks_app_logs_
+    - e2e-ds-genai
     defaultTimeRange: now-1h
     maxScanHours: 3
     lineLimit: 1000

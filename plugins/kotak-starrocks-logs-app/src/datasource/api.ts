@@ -9,8 +9,8 @@ import {
   toDataQueryResponse,
 } from '@grafana/runtime';
 
-import { getAppConfig, viewPrefixFor } from '../config/config';
-import { columnsQuery, queryHint, viewsQuery, withQueryHint } from '../sql/builder';
+import { getAppConfig, viewPrefixesFor } from '../config/config';
+import { queryHint, sampleRowQuery, viewsQuery, withQueryHint } from '../sql/builder';
 
 export interface StarRocksDatasource {
   uid: string;
@@ -186,27 +186,70 @@ export function stringColumn(frame: DataFrame | undefined, name?: string): strin
   return (field?.values ?? []).map((v) => (v === null || v === undefined ? '' : String(v)));
 }
 
-/** Views (vw_eks_app_logs_*) of a data source's database that this user can see (SHOW TABLES, Ranger-filtered). */
+/**
+ * Log views of a data source's database that this user can see: one SHOW TABLES LIKE per view prefix
+ * (vw_eks_app_logs_*, vw_genai_logs_*, ...), each Ranger-filtered. LIKE treats "_" as a wildcard, so the names are
+ * checked against the prefixes again.
+ */
 export async function fetchViews(range: TimeRange, datasource?: string): Promise<string[]> {
-  const viewPrefix = viewPrefixFor(getAppConfig(), datasource);
-  const frames = await runSqlOnce(viewsQuery(viewPrefix), range, 'views', datasource);
-  return stringColumn(frames[0])
-    .filter((v) => v.startsWith(viewPrefix))
-    .sort();
+  const prefixes = viewPrefixesFor(getAppConfig(), datasource);
+  const lists = await Promise.all(
+    prefixes.map((p) => runSqlOnce(viewsQuery(p), range, 'views', datasource).then((f) => stringColumn(f[0])))
+  );
+  const views = new Set(lists.flat().filter((v) => prefixes.some((p) => v.startsWith(p))));
+  return Array.from(views).sort();
 }
 
-const columnCache = new Map<string, Promise<string[]>>();
+export interface ViewSample {
+  /** column names of the view (empty when the view has no row at all) */
+  names: string[];
+  /** one row, to tell structured (JSON) columns from plain ones */
+  row?: Record<string, unknown>;
+}
 
-/** Column names of a view. DESCRIBE is denied by Ranger, so this uses SELECT * ... LIMIT 0. */
-export function fetchColumns(view: string, range: TimeRange, datasource?: string): Promise<string[]> {
+const sampleCache = new Map<string, Promise<ViewSample>>();
+
+/**
+ * Column names of a view, from one of its rows: DESCRIBE is denied by Ranger, and Grafana returns no columns for
+ * an empty result (SELECT * ... LIMIT 0). First a row of the last day on the usual time column; a view without
+ * that column (or without a recent row) is sampled with a plain LIMIT 1. Cached per data source and view.
+ */
+export function fetchViewSample(view: string, range: TimeRange, datasource?: string): Promise<ViewSample> {
   const key = `${datasource ?? ''}/${view}`;
-  let p = columnCache.get(key);
+  let p = sampleCache.get(key);
   if (!p) {
-    p = runSqlOnce(columnsQuery(view), range, 'columns', datasource).then((frames) =>
-      (frames[0]?.fields ?? []).map((f) => f.name)
-    );
-    p.catch(() => columnCache.delete(key));
-    columnCache.set(key, p);
+    const read = async (bounded: boolean): Promise<ViewSample> => {
+      const frames = await runSqlOnce(sampleRowQuery(view, bounded), range, 'columns', datasource, { timeZone: null });
+      const frame = frames[0];
+      const names = (frame?.fields ?? []).map((f) => f.name);
+      const row =
+        frame && frame.length > 0 ? Object.fromEntries(frame.fields.map((f) => [f.name, f.values[0]])) : undefined;
+      return { names, row };
+    };
+    p = read(true)
+      .catch(() => ({ names: [] }) as ViewSample)
+      .then((s) => (s.names.length > 0 ? s : read(false)));
+    p.catch(() => sampleCache.delete(key));
+    sampleCache.set(key, p);
   }
   return p;
+}
+
+const relations = new Map<string, string>();
+
+/**
+ * The FROM target of a view that is read through a renaming derived table (set by buildContext), for the queries
+ * that run without a build context: the time zone probe and the oldest-line probes.
+ */
+export function setRelation(datasource: string | undefined, view: string, relation: string | undefined) {
+  const key = `${datasource ?? ''}/${view}`;
+  if (relation) {
+    relations.set(key, relation);
+  } else {
+    relations.delete(key);
+  }
+}
+
+export function relationOf(datasource: string | undefined, view: string): string | undefined {
+  return relations.get(`${datasource ?? ''}/${view}`);
 }

@@ -6,6 +6,8 @@ import { getOldestCache, getTimeModeCache, setOldestCache } from '../state/stora
 const runSqlOnce = jest.fn();
 const setSessionZone = jest.fn();
 jest.mock('./api', () => ({
+  setRelation: () => undefined,
+  relationOf: () => undefined,
   runSqlOnce: (...args: unknown[]) => runSqlOnce(...args),
   setSessionZone: (...args: unknown[]) => setSessionZone(...args),
   stringColumn: (frame: DataFrame | undefined, name: string) =>

@@ -2,7 +2,7 @@ import { dateTime, TimeRange } from '@grafana/data';
 
 import { anyBeforeQuery, oldestInRangeQuery } from '../sql/builder';
 import { getOldestCache, setOldestCache } from '../state/storage';
-import { runSqlOnce } from './api';
+import { relationOf, runSqlOnce } from './api';
 import { findOldest } from './oldestSearch';
 
 const HOUR_MS = 3_600_000;
@@ -28,15 +28,16 @@ export function fetchOldestLog(view: string, datasource: string, nowMs = Date.no
   let p = inFlight.get(key);
   if (!p) {
     const range = rangeAround(nowMs);
+    const relation = relationOf(datasource, view);
     const anyBefore = async (ms: number) => {
-      const frames = await runSqlOnce(anyBeforeQuery(view, ms), range, 'oldest', datasource, {
+      const frames = await runSqlOnce(anyBeforeQuery(view, ms, relation), range, 'oldest', datasource, {
         view,
         timeoutSeconds: PROBE_TIMEOUT_SECONDS,
       });
       return (frames[0]?.length ?? 0) > 0;
     };
     const oldestIn = async (fromMs: number, toMs: number) => {
-      const frames = await runSqlOnce(oldestInRangeQuery(view, fromMs, toMs), range, 'oldest', datasource, {
+      const frames = await runSqlOnce(oldestInRangeQuery(view, fromMs, toMs, relation), range, 'oldest', datasource, {
         view,
         timeoutSeconds: PROBE_TIMEOUT_SECONDS,
       });

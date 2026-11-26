@@ -13,8 +13,12 @@ const runSql = jest.fn();
 jest.mock('./timeZone', () => ({ ensureSessionZone: async () => undefined }));
 jest.mock('./ContextScope', () => ({ ContextScope: () => null }));
 jest.mock('./api', () => ({
+  setRelation: () => undefined,
+  relationOf: () => undefined,
   runSql: (...args: unknown[]) => runSql(...args),
-  fetchColumns: async () => ['observed_timestamp', 'message', 'level', 'k8s_service_name', 'k8s_pod_uid'],
+  fetchViewSample: async () => ({
+    names: ['observed_timestamp', 'message', 'level', 'k8s_service_name', 'k8s_pod_uid'],
+  }),
 }));
 
 const H = 3_600_000;

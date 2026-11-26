@@ -11,15 +11,12 @@ jest.mock('./timeZone', () => ({ ensureSessionZone: async () => undefined }));
 jest.mock('./ContextScope', () => ({ ContextScope: (props: unknown) => props }));
 const runSql = jest.fn();
 jest.mock('./api', () => ({
+  setRelation: () => undefined,
+  relationOf: () => undefined,
   runSql: (...args: unknown[]) => runSql(...args),
-  fetchColumns: async () => [
-    'observed_timestamp',
-    'message',
-    'level',
-    'k8s_service_name',
-    'k8s_pod_uid',
-    'k8s_pod_name',
-  ],
+  fetchViewSample: async () => ({
+    names: ['observed_timestamp', 'message', 'level', 'k8s_service_name', 'k8s_pod_uid', 'k8s_pod_name'],
+  }),
 }));
 
 const VIEW = 'vw_eks_app_logs_app_1961_observability';

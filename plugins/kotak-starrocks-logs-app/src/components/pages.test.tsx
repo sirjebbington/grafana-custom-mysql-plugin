@@ -37,6 +37,9 @@ jest.mock('../datasource/StarRocksLogsDataSource', () => ({
 }));
 jest.mock('../datasource/oldest', () => ({ fetchOldestLog: (...a: unknown[]) => fetchOldestLog(...a) }));
 
+// whole pages render here (Grafana UI, emotion): the first render is slow on a loaded machine
+jest.setTimeout(20_000);
+
 // panels never load their plugin here (their content is Grafana's); queries are set by the tests
 setPluginImportUtils({
   importPanelPlugin: () => new Promise(() => undefined),

@@ -34,6 +34,7 @@ seed() {
   for db in obs2_logs1_uat obs2_logs2_uat; do
     sr -N -e "SELECT '$db', app_id, COUNT(*) FROM $db.eks_app_logs GROUP BY app_id ORDER BY app_id"
   done
+  sr -N -e "SELECT 'obs2_genai1_uat', app_id, COUNT(*) FROM obs2_genai1_uat.agent_logs GROUP BY app_id ORDER BY app_id"
 }
 
 # The app's provisioning file is generated like in deploy-config: from Loki-style data source entries plus

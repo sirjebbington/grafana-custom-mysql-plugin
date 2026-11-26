@@ -1,5 +1,10 @@
 # Other jsonData keys of the e2e app (short ranges: the seed spans 4 hours).
-viewPrefix: vw_eks_app_logs_
 defaultTimeRange: now-1h
 maxScanHours: 3
 lineLimit: 1000
+# picker list: the two EKS databases, then the GenAI one (views found by the default prefixes
+# vw_eks_app_logs_ and vw_genai_logs_)
+datasources:
+  - e2e-ds-starrocks-logs
+  - e2e-ds-starrocks-logs2
+  - e2e-ds-genai

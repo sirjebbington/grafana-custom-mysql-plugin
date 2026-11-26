@@ -9,6 +9,8 @@ export const GRAFANA = process.env.GRAFANA_URL ?? 'http://localhost:23000';
 export const DS = { uid: 'e2e-ds-starrocks-logs', type: 'kotak-starrocks-datasource' };
 // second StarRocks database = second instance of the data source plugin
 export const DS2 = { uid: 'e2e-ds-starrocks-logs2', type: 'kotak-starrocks-datasource' };
+// GenAI agent logs: views vw_genai_logs_<app_id>_<app_name> with their own column names
+export const DS_GENAI = { uid: 'e2e-ds-genai', type: 'kotak-starrocks-datasource' };
 
 const defaultHints = new Map<string, string>();
 
@@ -23,10 +25,10 @@ export function appHint(mode: TimeMode): string {
 }
 
 /** Same probe as src/datasource/timeZone.ts: newest line in two zones, plus the session's own offset. */
-export async function detectMode(s: Session, view: string, ds = DS): Promise<TimeMode> {
+export async function detectMode(s: Session, view: string, ds = DS, relation?: string): Promise<TimeMode> {
   const probe = async (zone: string) =>
     (
-      await s.sql(newestTimeTextQuery(view), 'now-1h', 'now', ds, {
+      await s.sql(newestTimeTextQuery(view, relation), 'now-1h', 'now', ds, {
         hint: queryHint({ timeZone: zone, timeoutSeconds: 30 }),
       })
     )[0]?.t as string | undefined;

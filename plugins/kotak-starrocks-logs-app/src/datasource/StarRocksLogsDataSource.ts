@@ -31,15 +31,16 @@ import { DataQuery } from '@grafana/schema';
 import {
   DEFAULT_FIELDS,
   DEFAULT_LABELS,
+  DEFAULT_MESSAGE_LEVEL_REGEX,
   LEVEL_COLUMN,
   MESSAGE_COLUMN,
   POD_NAME_COLUMN,
-  POD_UID_COLUMN,
   RUNTIME_DS_TYPE,
   RUNTIME_DS_UID,
   TIME_COLUMN,
 } from '../constants';
 import { getAppConfig, resolveTenant } from '../config/config';
+import { podColumnOf, resolveViewColumns } from '../sql/columns';
 import {
   BuildContext,
   contextQuery,
@@ -58,7 +59,7 @@ import {
   widenToSeconds,
 } from '../sql/builder';
 import { QueryKind, QueryParams, QuerySpec } from '../state/types';
-import { fetchColumns, runSql } from './api';
+import { fetchViewSample, runSql, setRelation } from './api';
 import { ContextScope } from './ContextScope';
 import { getCached, putCached } from './queryCache';
 import { ensureSessionZone } from './timeZone';
@@ -108,20 +109,50 @@ const ALL_COLUMNS = [
   ...DEFAULT_FIELDS,
 ];
 
+/**
+ * What the queries of a view need: its columns (from one sample row), labels and fields, the tenant settings and,
+ * when the view names its time, message or level column differently, the derived table that renames them.
+ */
 export async function buildContext(view: string, range: TimeRange, datasource = ''): Promise<BuildContext> {
   const config = getAppConfig();
-  let columns = await fetchColumns(view, range, datasource);
-  if (columns.length === 0) {
-    columns = ALL_COLUMNS;
+  let tenant = resolveTenant(config, view, datasource || config.datasource.uid);
+  const sample = await fetchViewSample(view, range, datasource);
+  let ctx: BuildContext;
+  if (sample.names.length === 0) {
+    // a view without any row: the usual columns (there is nothing to show anyway)
+    ctx = {
+      tenant,
+      columns: ALL_COLUMNS,
+      labels: config.labels.filter((c) => ALL_COLUMNS.includes(c)),
+      fields: config.fields.filter((c) => ALL_COLUMNS.includes(c)),
+      serviceLabel: config.serviceLabel,
+    };
+  } else {
+    const v = resolveViewColumns(view, sample.names, sample.row, {
+      labels: config.labels,
+      fields: config.fields,
+      serviceLabel: config.serviceLabel,
+      overrides: tenant.columns,
+    });
+    // no level column: the level is read from the message with the tenant's rules
+    if (!v.hasLevel && tenant.level.source === 'column') {
+      tenant = { ...tenant, level: { source: 'message', regex: DEFAULT_MESSAGE_LEVEL_REGEX } };
+    }
+    ctx = {
+      tenant,
+      columns: v.columns,
+      labels: v.labels,
+      fields: v.fields,
+      details: v.details,
+      relation: v.relation,
+      serviceLabel: v.serviceLabel,
+      podColumns: v.podColumns,
+    };
   }
+  setRelation(datasource, view, ctx.relation);
   // before the view's first data query: the session zone its statements run in
   await ensureSessionZone(view, datasource);
-  return {
-    tenant: resolveTenant(config, view, datasource || config.datasource.uid),
-    columns,
-    labels: config.labels.filter((c) => columns.includes(c)),
-    fields: config.fields.filter((c) => columns.includes(c)),
-  };
+  return ctx;
 }
 
 export function bucketFor(range: TimeRange, maxPoints = 120): number {
@@ -135,9 +166,22 @@ export function buildSql(q: LogsAppQuery, ctx: BuildContext, range: TimeRange): 
   const config = getAppConfig();
   switch (q.kind) {
     case 'serviceVolume':
-      return serviceVolumeQuery(q.spec, ctx, p.label ?? config.serviceLabel, bucket, p.withLevel ?? true, p.sample);
+      return serviceVolumeQuery(
+        q.spec,
+        ctx,
+        p.label ?? ctx.serviceLabel ?? config.serviceLabel,
+        bucket,
+        p.withLevel ?? true,
+        p.sample
+      );
     case 'serviceSamples':
-      return serviceSamplesQuery(q.spec, ctx, p.label ?? config.serviceLabel, p.values ?? [], p.perValue ?? 10);
+      return serviceSamplesQuery(
+        q.spec,
+        ctx,
+        p.label ?? ctx.serviceLabel ?? config.serviceLabel,
+        p.values ?? [],
+        p.perValue ?? 10
+      );
     case 'volume':
       return volumeQuery(q.spec, ctx, bucket, p.withLevel ?? true, p.sample);
     case 'logs':
@@ -150,7 +194,7 @@ export function buildSql(q: LogsAppQuery, ctx: BuildContext, range: TimeRange): 
     case 'labelOverview':
       return labelOverviewQuery(q.spec, ctx, p.labels ?? ctx.labels, bucket);
     case 'valueBreakdown':
-      return valueBreakdownQuery(q.spec, ctx, p.label ?? config.serviceLabel, bucket);
+      return valueBreakdownQuery(q.spec, ctx, p.label ?? ctx.serviceLabel ?? config.serviceLabel, bucket);
     case 'fieldBreakdown':
       return fieldBreakdownQuery(q.spec, ctx, p.field ?? '', bucket);
     case 'patterns':
@@ -385,7 +429,7 @@ export class StarRocksLogsDataSource extends RuntimeDataSource<LogsAppQuery> {
       string,
       string
     >;
-    const podColumn = labels[POD_UID_COLUMN] ? POD_UID_COLUMN : POD_NAME_COLUMN;
+    const podColumn = podColumnOf(labels) ?? POD_NAME_COLUMN;
     return createElement(ContextScope, { labels, podColumn });
   }
 
@@ -405,9 +449,7 @@ export class StarRocksLogsDataSource extends RuntimeDataSource<LogsAppQuery> {
       string,
       string
     >;
-    const podColumn = labels[POD_UID_COLUMN] ? POD_UID_COLUMN : POD_NAME_COLUMN;
-    const pod = labels[podColumn];
-    if (!tsRaw || !pod) {
+    if (!tsRaw) {
       return { data: [] };
     }
     const direction = options?.direction === LogRowContextQueryDirection.Forward ? 'forward' : 'backward';
@@ -419,6 +461,12 @@ export class StarRocksLogsDataSource extends RuntimeDataSource<LogsAppQuery> {
     };
     const datasource = query?.spec?.datasource ?? '';
     const ctx = await buildContext(view, range, datasource);
+    // lines of the same source: the view's pod column, or the first identifying column this line has
+    const podColumn = podColumnOf(labels, ctx.podColumns);
+    const pod = podColumn ? labels[podColumn] : undefined;
+    if (!podColumn || !pod) {
+      return { data: [] };
+    }
     // the message breaks ties: lines of the same pod with the same microsecond (42 % of lines on UAT)
     const sql = contextQuery(view, ctx, podColumn, pod, tsRaw, direction, options?.limit ?? 50, row.entry);
     const res = await lastValueFrom(runSql(sql, { datasource, view, refId: `context-${direction}`, range }));

@@ -23,17 +23,31 @@ export interface PatternConfig {
   regex?: string;
 }
 
+/**
+ * What a column is used for. Views can name their columns differently (the GenAI views do); the app finds each
+ * role by common names (sql/columns.ts) unless a tenant names the column here.
+ */
+export type ColumnRole = 'time' | 'message' | 'level' | 'service' | 'pod';
+export const COLUMN_ROLES: ColumnRole[] = ['time', 'message', 'level', 'service', 'pod'];
+
 export interface TenantConfig {
   level?: LevelConfig;
   trace?: TraceConfig;
   patterns?: PatternConfig[];
+  /** the view's column for a role, when the built-in names do not find it */
+  columns?: Partial<Record<ColumnRole, string>>;
 }
 
 /** One StarRocks data source (one database) offered in the app's data source picker. */
 export interface DatasourceEntry {
   uid: string;
-  /** views of this data source are named <viewPrefix><app_id>; default: the top-level viewPrefix */
-  viewPrefix?: string;
+  /** view name prefixes of this data source (views are <prefix><app_id>); default: the top-level viewPrefix */
+  viewPrefix?: string | string[];
+}
+
+export interface ResolvedDatasource {
+  uid: string;
+  viewPrefixes?: string[];
 }
 
 /** jsonData of the app (provisioned through provisioning/plugins or edited on the configuration page). */
@@ -47,7 +61,8 @@ export interface AppJsonData {
    * datasourceType that the user can see.
    */
   datasources?: Array<string | DatasourceEntry>;
-  viewPrefix?: string;
+  /** view name prefixes; views are <prefix><app_id> (default: vw_eks_app_logs_ and vw_genai_logs_) */
+  viewPrefix?: string | string[];
   serviceLabel?: string;
   defaultTimeRange?: string;
   /** longest time range a user can select, in hours (default 24); longer ranges are cut to this length */
@@ -84,14 +99,15 @@ export interface ResolvedTenant {
   level: { source: 'column' | 'message'; regex: string[] };
   trace?: TraceConfig;
   patterns: PatternConfig[];
+  columns: Partial<Record<ColumnRole, string>>;
 }
 
 export interface ResolvedConfig {
   /** default data source and the plugin type of all data sources the app uses */
   datasource: { uid: string; type: string };
   /** explicit list for the picker; empty = every instance of datasource.type */
-  datasources: DatasourceEntry[];
-  viewPrefix: string;
+  datasources: ResolvedDatasource[];
+  viewPrefixes: string[];
   serviceLabel: string;
   defaultTimeRange: string;
   maxRangeHours: number;
@@ -107,7 +123,7 @@ export interface ResolvedConfig {
 export const DEFAULT_CONFIG: ResolvedConfig = {
   datasource: { uid: 'app-logs-starrocks-db', type: 'kotak-starrocks-datasource' },
   datasources: [],
-  viewPrefix: 'vw_eks_app_logs_',
+  viewPrefixes: ['vw_eks_app_logs_', 'vw_genai_logs_'],
   serviceLabel: 'k8s_service_name',
   defaultTimeRange: 'now-15m',
   maxRangeHours: 24,
@@ -141,6 +157,17 @@ function regexError(re: string, needsGroup: boolean): string | undefined {
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
+}
+
+/** A prefix or a list of prefixes; undefined (and an error) when not valid. */
+function parsePrefixes(v: unknown, where: string, errors: string[]): string[] | undefined {
+  const list = Array.isArray(v) ? v : [v];
+  const bad = list.filter((p) => !(typeof p === 'string' && PREFIX.test(p)));
+  if (list.length === 0 || bad.length > 0) {
+    errors.push(`${where} ${JSON.stringify(v)}: prefixes may only contain letters, digits and _`);
+    return undefined;
+  }
+  return Array.from(new Set(list as string[]));
 }
 
 function asList(v: string | string[] | undefined): string[] {
@@ -180,29 +207,23 @@ export function resolveConfig(jsonData?: AppJsonData | null): { config: Resolved
           errors.push(`datasources: ${JSON.stringify(d)} is not a data source uid`);
           continue;
         }
-        if (
-          entry.viewPrefix !== undefined &&
-          !(typeof entry.viewPrefix === 'string' && PREFIX.test(entry.viewPrefix))
-        ) {
-          errors.push(
-            `datasources.${entry.uid}.viewPrefix "${entry.viewPrefix}" may only contain letters, digits and _`
-          );
-          continue;
+        let viewPrefixes: string[] | undefined;
+        if (entry.viewPrefix !== undefined) {
+          viewPrefixes = parsePrefixes(entry.viewPrefix, `datasources.${entry.uid}.viewPrefix`, errors);
+          if (!viewPrefixes) {
+            continue;
+          }
         }
         if (c.datasources.some((x) => x.uid === entry.uid)) {
           errors.push(`datasources: "${entry.uid}" is listed twice`);
           continue;
         }
-        c.datasources.push(entry.viewPrefix ? { uid: entry.uid, viewPrefix: entry.viewPrefix } : { uid: entry.uid });
+        c.datasources.push(viewPrefixes ? { uid: entry.uid, viewPrefixes } : { uid: entry.uid });
       }
     }
   }
   if (j.viewPrefix !== undefined) {
-    if (typeof j.viewPrefix === 'string' && PREFIX.test(j.viewPrefix)) {
-      c.viewPrefix = j.viewPrefix;
-    } else {
-      errors.push(`viewPrefix "${j.viewPrefix}" may only contain letters, digits and _`);
-    }
+    c.viewPrefixes = parsePrefixes(j.viewPrefix, 'viewPrefix', errors) ?? c.viewPrefixes;
   }
   if (j.serviceLabel !== undefined) {
     if (isIdentifier(j.serviceLabel)) {
@@ -313,6 +334,18 @@ function validateTenant(key: string, t: TenantConfig, errors: string[]): TenantC
       out.trace = { regex: t.trace.regex, tempoUid: t.trace.tempoUid, linkTitle: t.trace.linkTitle };
     }
   }
+  if (t.columns !== undefined) {
+    out.columns = {};
+    for (const [role, col] of Object.entries(t.columns ?? {})) {
+      if (!COLUMN_ROLES.includes(role as ColumnRole)) {
+        errors.push(`${where}.columns.${role}: unknown role (one of ${COLUMN_ROLES.join(', ')})`);
+      } else if (!isIdentifier(col)) {
+        errors.push(`${where}.columns.${role} "${col}" is not a column name`);
+      } else {
+        out.columns[role as ColumnRole] = col;
+      }
+    }
+  }
   if (t.patterns !== undefined) {
     const seen = new Set<string>();
     out.patterns = [];
@@ -342,21 +375,25 @@ function validateTenant(key: string, t: TenantConfig, errors: string[]): TenantC
   return out;
 }
 
-export function tenantKeyForView(view: string, prefix: string): string {
-  return view.startsWith(prefix) ? view.slice(prefix.length) : view;
+/** The app_id of a view: its name without the (longest) prefix it starts with. */
+export function tenantKeyForView(view: string, prefixes: string | string[]): string {
+  const match = (Array.isArray(prefixes) ? prefixes : [prefixes])
+    .filter((p) => view.startsWith(p))
+    .sort((a, b) => b.length - a.length)[0];
+  return match ? view.slice(match.length) : view;
 }
 
-/** View name prefix of a data source (its own, or the top-level viewPrefix). */
-export function viewPrefixFor(config: ResolvedConfig, datasourceUid?: string): string {
-  return config.datasources.find((d) => d.uid === datasourceUid)?.viewPrefix ?? config.viewPrefix;
+/** View name prefixes of a data source (its own, or the top-level ones). */
+export function viewPrefixesFor(config: ResolvedConfig, datasourceUid?: string): string[] {
+  return config.datasources.find((d) => d.uid === datasourceUid)?.viewPrefixes ?? config.viewPrefixes;
 }
 
 /**
  * Settings for a view: each field comes from tenants["<datasourceUid>/<app_id>"], then tenants["<app_id>"],
- * then tenants.default.
+ * then tenants.default (column names: per role, in the same order).
  */
 export function resolveTenant(config: ResolvedConfig, view: string, datasourceUid?: string): ResolvedTenant {
-  const key = tenantKeyForView(view, viewPrefixFor(config, datasourceUid));
+  const key = tenantKeyForView(view, viewPrefixesFor(config, datasourceUid));
   const d = config.tenants.default ?? {};
   const t = config.tenants[key] ?? {};
   const s = (datasourceUid && config.tenants[`${datasourceUid}/${key}`]) || {};
@@ -370,6 +407,7 @@ export function resolveTenant(config: ResolvedConfig, view: string, datasourceUi
     },
     trace: s.trace ?? t.trace ?? d.trace,
     patterns: s.patterns ?? t.patterns ?? d.patterns ?? [],
+    columns: { ...d.columns, ...t.columns, ...s.columns },
   };
 }
 

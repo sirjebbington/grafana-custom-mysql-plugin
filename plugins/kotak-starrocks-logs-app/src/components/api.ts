@@ -3,6 +3,7 @@ import { AdHocFiltersVariable, SceneObject } from '@grafana/scenes';
 import { getAppConfig } from '../config/config';
 import { BuildContext } from '../sql/builder';
 import { LabelFilter, LineFilter, MessageFieldFilter, PatternFilter, QuerySpec } from '../state/types';
+import { COLUMN_CANDIDATES } from '../sql/columns';
 
 export type Tab = 'logs' | 'labels' | 'fields' | 'patterns';
 export type Display = 'logs' | 'table' | 'json';
@@ -53,5 +54,5 @@ export function getExploration(obj: SceneObject): ExplorationApi {
 
 /** Name shown for a label: the service label is "service", like Logs Drilldown. */
 export function displayLabel(label: string): string {
-  return label === getAppConfig().serviceLabel ? 'service' : label;
+  return label === getAppConfig().serviceLabel || COLUMN_CANDIDATES.service.includes(label) ? 'service' : label;
 }

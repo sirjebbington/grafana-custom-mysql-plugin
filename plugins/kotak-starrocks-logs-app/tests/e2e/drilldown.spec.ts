@@ -77,7 +77,7 @@ test.describe('as kmbl3e2e (two granted views)', () => {
     const filters = await labelFilters(page).boundingBox();
     const ds = await page.getByTestId('datasource-picker').boundingBox();
     const view = await page.getByTestId('view-picker').boundingBox();
-    const time = await page.getByTestId('data-testid TimePicker Open Button').boundingBox();
+    const time = await page.getByTestId('time-window-picker').boundingBox();
     expect(filters && ds && view && time).toBeTruthy();
     expect(filters!.x).toBeLessThan(ds!.x);
     expect(ds!.x).toBeLessThan(view!.x);
@@ -90,11 +90,12 @@ test.describe('as kmbl3e2e (two granted views)', () => {
     await expect(page.getByTestId('add-label')).toBeVisible();
     await page.screenshot({ path: `${SHOTS}/00-layout.png` });
 
-    await page.getByTestId('data-testid TimePicker Open Button').click();
-    await expect(page.getByText('Last 24 hours', { exact: true })).toBeVisible();
-    await expect(page.getByText('Last 5 minutes', { exact: true })).toBeVisible();
-    await expect(page.getByText('Last 2 days', { exact: true })).toHaveCount(0);
-    await expect(page.getByText('Last 7 days', { exact: true })).toHaveCount(0);
+    await page.getByTestId('time-window-picker').click();
+    const quick = page.getByTestId('time-window-quick');
+    await expect(quick.getByText('Last 24 hours', { exact: true })).toBeVisible();
+    await expect(quick.getByText('Last 5 minutes', { exact: true })).toBeVisible();
+    await expect(quick.getByText('Last 2 days', { exact: true })).toHaveCount(0);
+    await expect(quick.getByText('Last 7 days', { exact: true })).toHaveCount(0);
     await page.screenshot({ path: `${SHOTS}/00-quick-ranges.png` });
     await page.getByText('Last 3 hours', { exact: true }).click();
     await expect(page).toHaveURL(/from=now-3h/);
@@ -129,9 +130,11 @@ test.describe('as kmbl3e2e (two granted views)', () => {
     const dsPicker = page.getByLabel('Data source', { exact: true });
     await dsPicker.click();
     const options = page.getByRole('option');
-    await expect(options).toHaveCount(2);
+    // the two EKS databases, then the GenAI one (see the GenAI tests below)
+    await expect(options).toHaveCount(3);
     await expect(options.nth(0)).toContainText('app-logs-starrocks-db');
     await expect(options.nth(1)).toContainText('app-logs-starrocks-db2');
+    await expect(options.nth(2)).toContainText('genai-starrocks-db');
     await options.nth(1).click();
     await expect(page).toHaveURL(new RegExp(`ds=${DS2}`));
     // first view of the second database (sorted): payments
@@ -500,12 +503,11 @@ test.describe('as kmbl3e2e (two granted views)', () => {
   test('the time range is limited to 24 hours: typed ranges, links and zoom out', async ({ page }) => {
     await page.goto(appUrl({ view: OBS, from: 'now-7d', to: 'now' }));
     await expect(page.getByText('Time range limited to 24 hours')).toBeVisible();
-    await expect(page.getByTestId('data-testid TimePicker Open Button')).toContainText('Last 24 hours');
+    await expect(page.getByTestId('time-window-picker')).toContainText('Last 24 hours');
     await expect(page).toHaveURL(/from=now-24h/);
     await page.screenshot({ path: `${SHOTS}/13-range-limited.png` });
-    // zoom out from 24 hours stays at 24 hours
-    await page.getByRole('button', { name: /Zoom out time range/ }).click();
-    await expect(page.getByTestId('data-testid TimePicker Open Button')).toContainText('Last 24 hours');
+    // zoom out cannot go beyond 24 hours
+    await expect(page.getByRole('button', { name: /Zoom out time range/ })).toBeDisabled();
     // an absolute range of 3 days keeps its end and is cut to its last 24 hours
     const end = Date.now() - 3_600_000;
     await page.goto(appUrl({ view: OBS, from: String(end - 3 * 86_400_000), to: String(end) }));
@@ -710,7 +712,7 @@ test.describe('0.0.1: journey, loading, levels, context (laptop size)', () => {
     await page.goto(appUrl({ view: OBS, from: 'now-7d', to: 'now' }));
     const notice = page.getByTestId('range-capped');
     await expect(notice).toContainText('Time range limited to 24 hours');
-    const time = await page.getByTestId('data-testid TimePicker Open Button').boundingBox();
+    const time = await page.getByTestId('time-window-picker').boundingBox();
     const box = await notice.boundingBox();
     expect(box!.y).toBeGreaterThan(time!.y + time!.height - 1);
     await notice.getByLabel('Dismiss').click();
@@ -770,4 +772,98 @@ test('admins see the effective configuration', async ({ page }) => {
   await page.goto('/plugins/kotak-starrocks-logs-app?page=configuration');
   await expect(page.getByTestId('app-config')).toContainText('Effective configuration');
   await expect(page.getByTestId('app-config')).toContainText('e2e-tempo-obs');
+});
+
+test.describe('GenAI views (vw_genai_logs_*): other column names, found by the app', () => {
+  const GENAI = 'e2e-ds-genai';
+  const ROUTER = 'vw_genai_logs_app_7001_agentrouter';
+
+  test.beforeEach(async ({ page }) => {
+    await login(page, 'kmbl3e2e');
+  });
+
+  test('the GenAI views are listed; a grid by service_name with levels; the oldest log', async ({ page }) => {
+    await page.goto(appUrl({ ds: GENAI }));
+    await page.getByLabel('View', { exact: true }).click();
+    await expect(page.getByRole('option')).toHaveText([ROUTER, 'vw_genai_logs_app_7002_voiceagent']);
+    await page.keyboard.press('Escape');
+    for (const svc of ['agent-router', 'llm-gateway', 'tool-executor']) {
+      await expect(page.getByTestId(`service-row-${svc}`)).toBeVisible();
+    }
+    // service_name is shown as "service"; severity_text is a level column, so levels show without asking
+    await expect(page.getByRole('tab', { name: 'service' })).toBeVisible();
+    await expect(page.getByTestId('grid-levels')).toHaveCount(0);
+    await expect(page.getByTestId('oldest-log')).toContainText(/Oldest log \d/);
+    await page.screenshot({ path: `${SHOTS}/40-genai-grid.png` });
+  });
+
+  test("Show logs: the body as the line, levels, the view's other columns in the log details", async ({ page }) => {
+    await page.goto(appUrl({ ds: GENAI }));
+    await page.getByTestId('show-logs-llm-gateway').click();
+    // the view writes JSON bodies with get_json_string: '{"event": "completion", ...}'
+    await expect(logsMain(page)).toContainText(/"event": ?"completion"/);
+    await logsMain(page)
+      .getByText(/"event": ?"completion"/)
+      .first()
+      .click();
+    // a JSON column of the view (attributes) and plain ones (model, pod_name) in the details
+    await expect(logsMain(page)).toContainText('gen_ai.request.model');
+    await expect(logsMain(page)).toContainText('pod_name');
+    await page.screenshot({ path: `${SHOTS}/41-genai-logs.png` });
+
+    await page.goto(appUrl({ ds: GENAI, view: ROUTER, page: 'details', level: 'error' }));
+    await expect(logsMain(page)).toContainText('status=500');
+    await expect(logsMain(page)).not.toContainText('status=200');
+  });
+});
+
+test.describe('time control: only ranges of at most 24 hours can be picked', () => {
+  test.beforeEach(async ({ page }) => {
+    await login(page, 'kmbl3e2e');
+  });
+
+  test('an absolute range longer than 24 hours cannot be applied; a shorter one is applied as picked', async ({
+    page,
+  }) => {
+    await page.goto(appUrl({ view: OBS }));
+    await page.getByTestId('time-window-picker').click();
+    const panel = page.getByTestId('time-window-panel');
+    const inputs = panel.getByTestId('data-testid date-time-input');
+    const fmt = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+    const start = Math.floor((Date.now() - 48 * 3_600_000) / 60_000) * 60_000;
+    await inputs.nth(0).fill(fmt(start));
+    await inputs.nth(0).press('Tab');
+    // the end follows the start: at most 24 hours after it
+    await expect(inputs.nth(1)).toHaveValue(fmt(start + 24 * 3_600_000));
+    // the calendar of the end offers no day after that (today is disabled)
+    await panel.getByRole('button', { name: 'Time picker' }).nth(1).click();
+    const today = new Date().toLocaleDateString('en-US', {
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC',
+    });
+    await expect(page.getByRole('button', { name: today })).toBeDisabled();
+    await page.keyboard.press('Escape');
+    // typed past 24 hours: refused
+    await inputs.nth(1).fill(fmt(start + 30 * 3_600_000));
+    await inputs.nth(1).press('Tab');
+    await expect(panel.getByTestId('time-window-error')).toHaveText('Pick at most 24 hours');
+    await expect(panel.getByTestId('time-window-apply')).toBeDisabled();
+    await page.screenshot({ path: `${SHOTS}/42-time-window-refused.png` });
+    // 10 hours: applied exactly, no notice
+    await inputs.nth(1).fill(fmt(start + 10 * 3_600_000));
+    await inputs.nth(1).press('Tab');
+    await panel.getByTestId('time-window-apply').click();
+    await expect(page.getByTestId('time-window-panel')).toHaveCount(0);
+    await expect
+      .poll(() => {
+        const u = new URL(page.url());
+        const from = Date.parse(u.searchParams.get('from') ?? '') || Number(u.searchParams.get('from'));
+        const to = Date.parse(u.searchParams.get('to') ?? '') || Number(u.searchParams.get('to'));
+        return [from, to];
+      })
+      .toEqual([start, start + 10 * 3_600_000]);
+    await expect(page.getByTestId('range-capped')).toHaveCount(0);
+  });
 });

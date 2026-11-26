@@ -5,8 +5,15 @@ import { useStyles2 } from '@grafana/ui';
 
 import { POD_NAME_COLUMN, POD_UID_COLUMN } from '../constants';
 
-/** Columns shown at the top of "Show context", in this order (the first one present is the one matched). */
-export const CONTEXT_LABELS = [POD_UID_COLUMN, POD_NAME_COLUMN, 'k8s_namespace_name', 'k8s_service_name'];
+/** Columns shown at the top of "Show context" after the matched one, when the line has them. */
+export const CONTEXT_LABELS = [
+  POD_UID_COLUMN,
+  POD_NAME_COLUMN,
+  'k8s_namespace_name',
+  'k8s_service_name',
+  'service_name',
+  'namespace',
+];
 
 /**
  * Top of the "Show context" modal: which lines are shown (the same pod, up to one hour before and after the line,
@@ -14,7 +21,7 @@ export const CONTEXT_LABELS = [POD_UID_COLUMN, POD_NAME_COLUMN, 'k8s_namespace_n
  */
 export function ContextScope({ labels, podColumn }: { labels: Record<string, string>; podColumn: string }) {
   const styles = useStyles2(getStyles);
-  const shown = CONTEXT_LABELS.filter((k) => labels[k]);
+  const shown = [podColumn, ...CONTEXT_LABELS.filter((k) => k !== podColumn)].filter((k) => labels[k]);
   return (
     <div className={styles.wrapper} data-testid="context-scope">
       <code className={styles.selector}>

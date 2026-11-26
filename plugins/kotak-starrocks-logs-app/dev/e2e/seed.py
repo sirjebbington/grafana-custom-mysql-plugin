@@ -14,8 +14,13 @@ the views show observed_timestamp (the table holds UTC):
   ist      as IST wall-clock time whatever the session (a timestamp column written in local time)
   utc      as UTC wall-clock time whatever the session (a timestamp column written in UTC)
 The app detects which one it is and picks the session zone of its statements (src/sql/timeZone.ts).
+
+A third database, obs2_genai1_uat, holds GenAI agent logs (OpenTelemetry layout, table agent_logs) and per-app
+views vw_genai_logs_<app_id>_<app_name> that flatten them into log rows with their own column names (event_time,
+body, severity_text, service_name, ...): the app finds those columns itself (src/sql/columns.ts).
 """
 import datetime as dt
+import json
 import os
 import random
 import sys
@@ -286,6 +291,92 @@ def main():
         w(f"CREATE USER '{user}'@'%' IDENTIFIED WITH authentication_jwt AS {q(JWT)};\n")
         for db, app_id in views:
             w(f"GRANT SELECT ON VIEW {db}.vw_eks_app_logs_{app_id} TO USER '{user}'@'%';\n")
+    genai(w)
+
+
+# ---- GenAI agent logs --------------------------------------------------------------------------------------
+# The table is OpenTelemetry logs (logs.proto) as the GenAI pipeline writes it (stored as JSON here: native tables
+# cannot hold VARIANT); the views turn it into log rows, with column names that differ from the app log views.
+GENAI_DB = "obs2_genai1_uat"
+GENAI_ROWS = 3000
+# view app id, service, tenant, namespace, pods, body kind
+GENAI_SERVICES = [
+    ("app_7001_agentrouter", "agent-router", "genai-router", "genai-uat", 3, "router"),
+    ("app_7001_agentrouter", "llm-gateway", "genai-router", "genai-uat", 2, "gateway"),
+    ("app_7001_agentrouter", "tool-executor", "genai-router", "genai-uat", 2, "tool"),
+    ("app_7002_voiceagent", "voice-agent", "voice-agents", "voice-uat", 2, "voice"),
+]
+GENAI_APPS = sorted({s[0] for s in GENAI_SERVICES})
+# (severity_text, severity_number); an empty text leaves the level to the number
+SEVERITIES = [("INFO", 9)] * 6 + [("WARN", 13), ("ERROR", 17), ("DEBUG", 5), ("", 17), ("", 9), ("Information", 10)]
+GENAI_GRANTS = {"kmbl3e2e": GENAI_APPS}
+EPOCH = dt.datetime(1970, 1, 1)
+
+
+def genai_rows():
+    pods_by = {
+        name: [{"name": f"{name}-{hexid(10)}-{hexid(5)}", "uid": uid()} for _ in range(n)]
+        for _a, name, _t, _ns, n, _k in GENAI_SERVICES
+    }
+    span = HOURS * 3600
+    out = []
+    for _ in range(GENAI_ROWS):
+        app_id, name, tenant, ns, _n, kind = RNG.choice(GENAI_SERVICES)
+        pod = RNG.choice(pods_by[name])
+        ts = NOW - dt.timedelta(seconds=RNG.random() * span)
+        text, number = RNG.choice(SEVERITIES)
+        model = RNG.choice(["gpt-4o", "claude-sonnet", "llama-3-70b"])
+        if kind == "router":
+            status = 500 if number >= 17 else 200
+            body = f"routed request route=chat model={model} latency_ms={RNG.randint(40, 4000)} status={status}"
+        elif kind == "gateway":
+            body = {"event": "completion", "model": model, "tokens": RNG.randint(10, 4000), "finish_reason": "stop"}
+        elif kind == "tool":
+            body = f"tool call {RNG.choice(['search', 'crm_lookup', 'calculator'])} finished in {RNG.randint(5, 900)} ms"
+        else:
+            body = f"call session {RNG.choice(['started', 'ended'])} channel=sip duration_s={RNG.randint(1, 600)}"
+        resource = {
+            "service.name": name,
+            "k8s.namespace.name": ns,
+            "k8s.pod.name": pod["name"],
+            "k8s.pod.uid": pod["uid"],
+            "deployment.environment": "uat",
+        }
+        attributes = {"gen_ai.request.model": model, "gen_ai.operation.name": RNG.choice(["chat", "embeddings"])}
+        nanos = int((ts - EPOCH).total_seconds()) * 1_000_000_000 + ts.microsecond * 1000
+        out.append([
+            q(app_id), q(tenant), q(ts.strftime("%Y-%m-%d %H:%M:%S.%f")), str(nanos),
+            f"parse_json({q(json.dumps(resource))})", f"parse_json({q(json.dumps(body))})",
+            f"parse_json({q(json.dumps(attributes))})", q(hexid(32)), q(hexid(16)), q(text), str(number),
+        ])
+    return out
+
+
+def genai(w):
+    # recreated from scratch: earlier layouts of this database may have other objects
+    w(f"DROP DATABASE IF EXISTS {GENAI_DB} FORCE;\nCREATE DATABASE {GENAI_DB};\nUSE {GENAI_DB};\n")
+    w("CREATE TABLE agent_logs (\n  app_id VARCHAR(128), tenant VARCHAR(128), event_time DATETIME,\n"
+      "  event_time_unix_nano BIGINT, resource_attributes JSON, body JSON, attributes JSON,\n"
+      "  trace_id VARCHAR(64), span_id VARCHAR(32), severity_text VARCHAR(64), severity_number INT\n"
+      ") DUPLICATE KEY(app_id)\nDISTRIBUTED BY HASH(app_id) BUCKETS 3 PROPERTIES (\"replication_num\" = \"1\");\n")
+    rows = genai_rows()
+    for i in range(0, len(rows), 1000):
+        w("INSERT INTO agent_logs VALUES\n" + ",\n".join("(" + ", ".join(r) + ")" for r in rows[i:i + 1000]) + ";\n")
+    time_expr = (VIEW_TIME_EXPR[VIEW_TIME] or "observed_timestamp").replace("observed_timestamp", "event_time")
+    level = ("COALESCE(NULLIF(severity_text, ''), CASE WHEN severity_number >= 17 THEN 'ERROR' WHEN severity_number >= 13 "
+             "THEN 'WARN' WHEN severity_number >= 9 THEN 'INFO' ELSE 'DEBUG' END)")
+    for app_id in GENAI_APPS:
+        w(f"CREATE VIEW vw_genai_logs_{app_id} AS SELECT {time_expr} AS event_time, event_time_unix_nano,\n"
+          f"  get_json_string(body, '$') AS body, {level} AS severity_text,\n"
+          "  get_json_string(resource_attributes, '$.\"service.name\"') AS service_name,\n"
+          "  get_json_string(resource_attributes, '$.\"k8s.namespace.name\"') AS namespace,\n"
+          "  get_json_string(resource_attributes, '$.\"k8s.pod.name\"') AS pod_name,\n"
+          "  get_json_string(resource_attributes, '$.\"k8s.pod.uid\"') AS pod_uid,\n"
+          "  tenant, trace_id, span_id, get_json_string(attributes, '$.\"gen_ai.request.model\"') AS model,\n"
+          f"  CAST(attributes AS VARCHAR) AS attributes, app_id FROM agent_logs WHERE app_id = {q(app_id)};\n")
+    for user, apps in GENAI_GRANTS.items():
+        for app_id in apps:
+            w(f"GRANT SELECT ON VIEW {GENAI_DB}.vw_genai_logs_{app_id} TO USER '{user}'@'%';\n")
 
 
 if __name__ == "__main__":

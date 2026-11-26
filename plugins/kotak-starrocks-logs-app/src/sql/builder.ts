@@ -16,6 +16,17 @@ export interface BuildContext {
   columns: string[];
   labels: string[];
   fields: string[];
+  /** structured (JSON) columns: returned with each line for its details, never grouped by */
+  details?: string[];
+  /**
+   * FROM target when the view names its time, message or level column differently: a derived table that renames
+   * them (sql/columns.ts). Unset: the view itself.
+   */
+  relation?: string;
+  /** label of the value grid (the view's service column) */
+  serviceLabel?: string;
+  /** columns identifying where a line comes from (pod uid, pod name, ...), best first */
+  podColumns?: string[];
 }
 
 export function quoteIdent(name: string): string {
@@ -265,7 +276,7 @@ export function levelSplit(tenant: ResolvedTenant, ctx: BuildContext): Array<{ e
 
 /** Column used to spread a hash sample evenly over pods and time. */
 function sampleKey(ctx: BuildContext): string {
-  const pod = ['k8s_pod_uid', 'k8s_pod_name'].find((c) => ctx.columns.includes(c));
+  const pod = (ctx.podColumns ?? ['k8s_pod_uid', 'k8s_pod_name']).find((c) => ctx.columns.includes(c));
   return pod ? `${quoteIdent(pod)}, ${T}` : T;
 }
 
@@ -302,7 +313,7 @@ function countByLevel(
   const selects = parts.map((p) =>
     [
       `SELECT ${[...opts.select, `${p.out} AS ${opts.levelAlias}`, `${count} AS c`].join(', ')}`,
-      from(spec.view),
+      from(spec.view, ctx.relation),
       `WHERE ${whereClause(spec, ctx, { before: [...(p.cond ? [p.cond] : []), ...sample], levelBy: p.levelBy })}`,
       `GROUP BY ${groupBy}`,
     ].join('\n')
@@ -431,14 +442,16 @@ export function needsMessageScan(spec: QuerySpec, tenant: ResolvedTenant, includ
   );
 }
 
-function from(view: string): string {
-  return `FROM ${quoteIdent(view)}`;
+function from(view: string, relation?: string): string {
+  return `FROM ${relation ?? quoteIdent(view)}`;
 }
 
 /** Columns returned with every log line (labels first, then fields), limited to what the view has. */
 export function lineColumns(ctx: BuildContext): string[] {
   const skip = new Set([TIME_COLUMN, MESSAGE_COLUMN, LEVEL_COLUMN]);
-  return Array.from(new Set([...ctx.labels, ...ctx.fields])).filter((c) => ctx.columns.includes(c) && !skip.has(c));
+  return Array.from(new Set([...ctx.labels, ...ctx.fields, ...(ctx.details ?? [])])).filter(
+    (c) => ctx.columns.includes(c) && !skip.has(c)
+  );
 }
 
 /** Columns read inside the top-N of a lines query: no expression, so nothing is computed for dropped rows. */
@@ -476,7 +489,7 @@ function topLines(
   const n = Math.max(1, Math.floor(limit));
   const raw = rawLineColumns(ctx, opts.innerExtra).join(', ');
   const branches = wheres.map((w) =>
-    [`SELECT ${raw}`, from(view), `WHERE ${w}`, `ORDER BY ${orderBy}`, `LIMIT ${n}`].join('\n')
+    [`SELECT ${raw}`, from(view, ctx.relation), `WHERE ${w}`, `ORDER BY ${orderBy}`, `LIMIT ${n}`].join('\n')
   );
   const source = branches.length === 1 ? branches[0] : branches.map((b) => `(${b})`).join('\nUNION ALL\n');
   return [
@@ -501,8 +514,14 @@ export function viewsQuery(prefix: string): string {
   return `SHOW TABLES LIKE ${lit(`${prefix}%`)}`;
 }
 
-export function columnsQuery(view: string): string {
-  return `SELECT * ${from(view)} LIMIT 0`;
+/**
+ * One row of a view, for its column names: Grafana returns no columns for an empty result (LIMIT 0). The first
+ * try is bounded to the last day on the usual time column (cheap); a view that names its time column
+ * differently, or has no recent row, is sampled without a bound (LIMIT 1 stops at the first row).
+ */
+export function sampleRowQuery(view: string, bounded: boolean): string {
+  const where = bounded ? ` WHERE ${T} >= DATE_SUB(NOW(), INTERVAL 1 DAY)` : '';
+  return `SELECT * ${from(view)}${where} LIMIT 1`;
 }
 
 export function labelValuesQuery(spec: QuerySpec, ctx: BuildContext, key: string, limit = 500): string {
@@ -510,7 +529,7 @@ export function labelValuesQuery(spec: QuerySpec, ctx: BuildContext, key: string
   const others = { ...spec, filters: spec.filters.filter((f) => f.key !== key) };
   return [
     `SELECT ${col} AS v, COUNT(*) AS c`,
-    from(spec.view),
+    from(spec.view, ctx.relation),
     `WHERE ${whereClause(others, ctx, { extra: [`${col} != ''`] })}`,
     `GROUP BY ${col}`,
     `ORDER BY c DESC`,
@@ -602,7 +621,7 @@ export function labelOverviewQuery(spec: QuerySpec, ctx: BuildContext, labels: s
   return [
     `SELECT t, ${cols.join(', ')}, GROUPING_ID(${cols.join(', ')}) AS gid, COUNT(*) AS c`,
     `FROM (SELECT ${bucketExpr(bucket)} AS t, ${cols.join(', ')}`,
-    `  ${from(spec.view)}`,
+    `  ${from(spec.view, ctx.relation)}`,
     `  WHERE ${whereClause(spec, ctx)}) s`,
     `GROUP BY GROUPING SETS (${cols.map((c) => `(t, ${c})`).join(', ')})`,
   ].join('\n');
@@ -612,7 +631,7 @@ export function valueBreakdownQuery(spec: QuerySpec, ctx: BuildContext, key: str
   const col = quoteIdent(key);
   return [
     `SELECT ${bucketExpr(bucket)} AS t, ${col} AS v, COUNT(*) AS c`,
-    from(spec.view),
+    from(spec.view, ctx.relation),
     `WHERE ${whereClause(spec, ctx, { extra: [`${col} != ''`] })}`,
     `GROUP BY t, v`,
     `ORDER BY t`,
@@ -624,7 +643,7 @@ export function fieldBreakdownQuery(spec: QuerySpec, ctx: BuildContext, field: s
   return [
     `SELECT t, v, COUNT(*) AS c`,
     `FROM (SELECT ${bucketExpr(bucket)} AS t, regexp_extract(${M}, ${lit(messageFieldRegex(field))}, 2) AS v`,
-    `  ${from(spec.view)}`,
+    `  ${from(spec.view, ctx.relation)}`,
     `  WHERE ${whereClause(spec, ctx)}) s`,
     `WHERE v != ''`,
     `GROUP BY t, v`,
@@ -643,7 +662,7 @@ export function patternsQuery(spec: QuerySpec, ctx: BuildContext, bucket: number
     `SELECT ${bucketExpr(bucket)} AS t,`,
     `  CASE\n    ${cases}\n    ELSE '' END AS p,`,
     `  COUNT(*) AS c`,
-    from(spec.view),
+    from(spec.view, ctx.relation),
     `WHERE ${whereClause(spec, ctx, { skipPatterns: true })}`,
     `GROUP BY t, p`,
     `ORDER BY t`,
@@ -654,10 +673,10 @@ export function patternsQuery(spec: QuerySpec, ctx: BuildContext, bucket: number
  * The newest line's time as text, in the last day (TopN with LIMIT 1). Run with two session zones to tell an
  * instant-like column from a wall-clock one (sql/timeZone.ts).
  */
-export function newestTimeTextQuery(view: string): string {
+export function newestTimeTextQuery(view: string, relation?: string): string {
   return [
     `SELECT CAST(${T} AS VARCHAR) AS t`,
-    from(view),
+    from(view, relation),
     `WHERE ${T} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`,
     `ORDER BY ${T} DESC`,
     `LIMIT 1`,
@@ -670,16 +689,16 @@ export function sessionZoneQuery(): string {
 }
 
 /** Is there any line older than beforeMs? LIMIT 1: StarRocks stops at the first row it finds. */
-export function anyBeforeQuery(view: string, beforeMs: number): string {
-  return `SELECT 1 AS x ${from(view)} WHERE ${T} < FROM_UNIXTIME(${Math.floor(beforeMs / 1000)}) LIMIT 1`;
+export function anyBeforeQuery(view: string, beforeMs: number, relation?: string): string {
+  return `SELECT 1 AS x ${from(view, relation)} WHERE ${T} < FROM_UNIXTIME(${Math.floor(beforeMs / 1000)}) LIMIT 1`;
 }
 
 /** Oldest line in a short range (the hour found by the search in findOldest), as epoch ms. */
-export function oldestInRangeQuery(view: string, fromMs: number, toMs: number): string {
+export function oldestInRangeQuery(view: string, fromMs: number, toMs: number, relation?: string): string {
   const s = (ms: number) => Math.floor(ms / 1000);
   return [
     `SELECT ${timeMsExpr(`MIN(${T})`)} AS oldest`,
-    from(view),
+    from(view, relation),
     `WHERE ${T} >= FROM_UNIXTIME(${s(fromMs)}) AND ${T} < FROM_UNIXTIME(${s(toMs)})`,
   ].join('\n');
 }

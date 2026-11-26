@@ -12,7 +12,8 @@ import { fetchViews, listDatasources } from '../datasource/api';
 const EXAMPLE: AppJsonData = {
   datasourceUid: 'app-logs-starrocks-db',
   datasources: ['app-logs-starrocks-db', { uid: 'app-logs-starrocks-db2', viewPrefix: 'vw_eks_app_logs_' }],
-  viewPrefix: 'vw_eks_app_logs_',
+  // EKS app log views and GenAI log views (the default); a data source can have its own list
+  viewPrefix: ['vw_eks_app_logs_', 'vw_genai_logs_'],
   maxRangeHours: 24,
   maxScanHours: 6,
   tenants: {
@@ -97,7 +98,7 @@ export function AppConfig({ plugin }: PluginConfigPageProps<AppPluginMeta<AppJso
       )}
       <Field
         label="jsonData"
-        description="Keys: datasourceUid, datasources, viewPrefix, serviceLabel, defaultTimeRange, maxRangeHours, maxScanHours, lineLimit, queryTimeoutSeconds, timeZone, labels, fields, tenants (app_id or <datasourceUid>/<app_id>)"
+        description="Keys: datasourceUid, datasources, viewPrefix (one or a list), serviceLabel, defaultTimeRange, maxRangeHours, maxScanHours, lineLimit, queryTimeoutSeconds, timeZone, labels, fields, tenants (app_id or <datasourceUid>/<app_id>; columns: time, message, level, service, pod when a view names them differently)"
       >
         <TextArea rows={24} value={text} onChange={(e) => setText(e.currentTarget.value)} className={styles.mono} />
       </Field>

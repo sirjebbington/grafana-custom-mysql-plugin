@@ -4,7 +4,7 @@ import { getAppConfig } from '../config/config';
 import { newestTimeTextQuery, sessionZoneQuery } from '../sql/builder';
 import { decideTimeMode, PROBE_ZONES, TimeMode, zoneForMode } from '../sql/timeZone';
 import { getTimeModeCache, setTimeModeCache } from '../state/storage';
-import { runSqlOnce, setSessionZone, stringColumn } from './api';
+import { relationOf, runSqlOnce, setSessionZone, stringColumn } from './api';
 
 const CACHE_MS = 24 * 3_600_000;
 const PROBE_TIMEOUT_SECONDS = 30;
@@ -17,10 +17,16 @@ function nowRange(): TimeRange {
 }
 
 async function probe(view: string, datasource: string, zone: string): Promise<string | undefined> {
-  const frames = await runSqlOnce(newestTimeTextQuery(view), nowRange(), 'tz', datasource, {
-    timeZone: zone,
-    timeoutSeconds: PROBE_TIMEOUT_SECONDS,
-  });
+  const frames = await runSqlOnce(
+    newestTimeTextQuery(view, relationOf(datasource, view)),
+    nowRange(),
+    'tz',
+    datasource,
+    {
+      timeZone: zone,
+      timeoutSeconds: PROBE_TIMEOUT_SECONDS,
+    }
+  );
   return stringColumn(frames[0], 't')[0];
 }
 

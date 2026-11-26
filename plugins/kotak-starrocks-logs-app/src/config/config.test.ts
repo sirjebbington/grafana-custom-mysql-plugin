@@ -1,12 +1,13 @@
 import { DEFAULT_MESSAGE_LEVEL_REGEX } from '../constants';
-import { DEFAULT_CONFIG, resolveConfig, resolveTenant, tenantKeyForView, viewPrefixFor } from './config';
+import { DEFAULT_CONFIG, resolveConfig, resolveTenant, tenantKeyForView, viewPrefixesFor } from './config';
 
 describe('resolveConfig', () => {
   it('uses defaults for empty jsonData', () => {
     const { config, errors } = resolveConfig(undefined);
     expect(errors).toEqual([]);
     expect(config.datasource).toEqual(DEFAULT_CONFIG.datasource);
-    expect(config.viewPrefix).toBe('vw_eks_app_logs_');
+    // the EKS app log views and the GenAI log views
+    expect(config.viewPrefixes).toEqual(['vw_eks_app_logs_', 'vw_genai_logs_']);
     expect(config.labels[0]).toBe('k8s_service_name');
   });
 
@@ -20,7 +21,7 @@ describe('resolveConfig', () => {
       defaultTimeRange: 'yesterday',
     });
     expect(config.datasource.uid).toBe('ds1');
-    expect(config.viewPrefix).toBe('vw_eks_app_logs_');
+    expect(config.viewPrefixes).toEqual(['vw_eks_app_logs_', 'vw_genai_logs_']);
     expect(config.lineLimit).toBe(100);
     expect(config.labels).toEqual(['k8s_service_name', 'a']);
     expect(errors).toHaveLength(4);
@@ -108,7 +109,7 @@ describe('several data sources (one per StarRocks database)', () => {
       ],
     });
     expect(config.datasource.uid).toBe('db1');
-    expect(config.datasources).toEqual([{ uid: 'db1' }, { uid: 'db2', viewPrefix: 'vw_other_' }]);
+    expect(config.datasources).toEqual([{ uid: 'db1' }, { uid: 'db2', viewPrefixes: ['vw_other_'] }]);
     expect(errors).toHaveLength(3);
   });
 
@@ -121,8 +122,8 @@ describe('several data sources (one per StarRocks database)', () => {
       datasources: ['db1', { uid: 'db2', viewPrefix: 'vw_other_' }],
       tenants: { app_7: { level: { source: 'message' } } },
     });
-    expect(viewPrefixFor(config, 'db2')).toBe('vw_other_');
-    expect(viewPrefixFor(config, 'db1')).toBe('vw_eks_app_logs_');
+    expect(viewPrefixesFor(config, 'db2')).toEqual(['vw_other_']);
+    expect(viewPrefixesFor(config, 'db1')).toEqual(['vw_eks_app_logs_', 'vw_genai_logs_']);
     expect(resolveTenant(config, 'vw_other_app_7', 'db2').key).toBe('app_7');
     expect(resolveTenant(config, 'vw_other_app_7', 'db2').level.source).toBe('message');
   });
@@ -142,5 +143,53 @@ describe('several data sources (one per StarRocks database)', () => {
     expect(inDb2.trace?.tempoUid).toBe('tempo');
     expect(inDb2.patterns).toEqual([{ name: 'd', like: '%d%' }]);
     expect(resolveTenant(config, 'vw_eks_app_logs_app_1', 'db1').level.source).toBe('message');
+  });
+});
+
+describe('several view prefixes (EKS app logs, GenAI logs)', () => {
+  it('viewPrefix takes one prefix or a list, at the top level and per data source', () => {
+    const { config, errors } = resolveConfig({
+      viewPrefix: ['vw_eks_app_logs_', 'vw_genai_logs_', 'vw_onprem_logs_'],
+      datasources: [
+        { uid: 'genai', viewPrefix: ['vw_genai_logs_'] },
+        { uid: 'bad', viewPrefix: ['ok_', 'x y'] },
+      ],
+    });
+    expect(config.viewPrefixes).toEqual(['vw_eks_app_logs_', 'vw_genai_logs_', 'vw_onprem_logs_']);
+    expect(viewPrefixesFor(config, 'genai')).toEqual(['vw_genai_logs_']);
+    expect(config.datasources.map((d) => d.uid)).toEqual(['genai']);
+    expect(errors).toEqual([
+      'datasources.bad.viewPrefix ["ok_","x y"]: prefixes may only contain letters, digits and _',
+    ]);
+    expect(resolveConfig({ viewPrefix: 'vw_x_' }).config.viewPrefixes).toEqual(['vw_x_']);
+  });
+
+  it('the app_id is the view name without the prefix it starts with (the longest one)', () => {
+    const prefixes = ['vw_eks_app_logs_', 'vw_genai_logs_', 'vw_genai_logs_v2_'];
+    expect(tenantKeyForView('vw_genai_logs_app_7001_agentrouter', prefixes)).toBe('app_7001_agentrouter');
+    expect(tenantKeyForView('vw_eks_app_logs_app_1961_observability', prefixes)).toBe('app_1961_observability');
+    expect(tenantKeyForView('vw_genai_logs_v2_app_1', prefixes)).toBe('app_1');
+    expect(tenantKeyForView('other_view', prefixes)).toBe('other_view');
+  });
+
+  it('a tenant can name its columns per role; default, app_id and <ds>/<app_id> merge per role', () => {
+    const { config, errors } = resolveConfig({
+      tenants: {
+        default: { columns: { pod: 'host' } },
+        app_7001_agentrouter: { columns: { time: 'event_ts', message: 'log_text' } },
+        'genai/app_7001_agentrouter': { columns: { message: 'body_text' } },
+        bad: { columns: { when: 'x', time: 'not a column' } as never },
+      },
+    });
+    expect(errors).toEqual([
+      'tenants.bad.columns.when: unknown role (one of time, message, level, service, pod)',
+      'tenants.bad.columns.time "not a column" is not a column name',
+    ]);
+    expect(resolveTenant(config, 'vw_genai_logs_app_7001_agentrouter', 'genai').columns).toEqual({
+      pod: 'host',
+      time: 'event_ts',
+      message: 'body_text',
+    });
+    expect(resolveTenant(config, 'vw_eks_app_logs_app_1').columns).toEqual({ pod: 'host' });
   });
 });

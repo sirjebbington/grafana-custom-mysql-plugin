@@ -12,7 +12,6 @@ import {
   SceneObjectUrlValues,
   SceneReactObject,
   SceneRefreshPicker,
-  SceneTimePicker,
   sceneGraph,
 } from '@grafana/scenes';
 import {
@@ -29,8 +28,8 @@ import {
   useStyles2,
 } from '@grafana/ui';
 
-import { LEVELS, QUICK_RANGES, RUNTIME_DS } from '../constants';
-import { getAppConfig, getAppConfigErrors, viewPrefixFor } from '../config/config';
+import { LEVELS, RUNTIME_DS } from '../constants';
+import { getAppConfig, getAppConfigErrors, viewPrefixesFor } from '../config/config';
 import { fetchViews, listDatasources, runSqlOnce, StarRocksDatasource, stringColumn } from '../datasource/api';
 import { fetchOldestLog } from '../datasource/oldest';
 import { buildContext } from '../datasource/StarRocksLogsDataSource';
@@ -58,8 +57,8 @@ import {
 } from '../state/types';
 import { Display, displayLabel, ExplorationApi, isExplorationApi, Tab as TabName } from './api';
 import { BreakdownScene, MESSAGE_FIELD_PREFIX } from './BreakdownScene';
-import { quickRangeMs } from '../state/timeRange';
 import { CappedTimeRange, cappedOf } from './CappedTimeRange';
+import { TimeWindowPicker } from './TimeWindowPicker';
 import { DetailsHeader } from './FiltersBar';
 import { LogsTabScene } from './LogsTabScene';
 import { PatternsTabScene } from './PatternsTabScene';
@@ -223,11 +222,8 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       search: '',
       gridLevels: false,
       controls: [
-        new SceneTimePicker({
-          quickRanges: QUICK_RANGES.filter(
-            (r) => (quickRangeMs(r.from) ?? 0) <= getAppConfig().maxRangeHours * 3_600_000
-          ),
-        }),
+        // at most maxRangeHours can be picked (quick ranges and absolute ranges alike)
+        new TimeWindowPicker({}),
         new SceneRefreshPicker({}),
       ],
       ...state,
@@ -544,7 +540,12 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
   // ---- ExplorationApi ----
 
   primaryLabel(): string {
-    return this.state.primaryLabel ?? getAppConfig().serviceLabel;
+    return this.state.primaryLabel ?? this.serviceLabel();
+  }
+
+  /** label of the "service" tab: the view's service column (k8s_service_name, service_name, ...) */
+  serviceLabel(): string {
+    return this.state.ctx?.serviceLabel ?? getAppConfig().serviceLabel;
   }
 
   getSpec(): QuerySpec {
@@ -724,13 +725,13 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
   }
 
   setPrimaryLabel(label: string) {
-    const primaryLabel = label === getAppConfig().serviceLabel ? undefined : label;
+    const primaryLabel = label === this.serviceLabel() ? undefined : label;
     this.navigate(() => this.setState({ primaryLabel, search: '' }));
     this.rebuild();
   }
 
   addLabelTab(label: string) {
-    if (label !== getAppConfig().serviceLabel && !this.state.labelTabs.includes(label)) {
+    if (label !== this.serviceLabel() && !this.state.labelTabs.includes(label)) {
       this.setState({ labelTabs: [...this.state.labelTabs, label] });
     }
     this.setPrimaryLabel(label);
@@ -740,7 +741,7 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
     const wasActive = this.primaryLabel() === label;
     this.setState({ labelTabs: this.state.labelTabs.filter((t) => t !== label) });
     if (wasActive) {
-      this.setPrimaryLabel(getAppConfig().serviceLabel);
+      this.setPrimaryLabel(this.serviceLabel());
     }
   }
 
@@ -850,7 +851,11 @@ export class LogsExploration extends SceneObjectBase<LogsExplorationState> imple
       return this.message(
         'info',
         'No log views available',
-        `StarRocks returned no views matching ${viewPrefixFor(config, s.datasource)}* in ${dsName} for your account. Ask for access to your team's log view${(s.datasources?.length ?? 0) > 1 ? ', or pick another data source' : ''}.`
+        `StarRocks returned no views matching ${viewPrefixesFor(config, s.datasource)
+          .map((p) => `${p}*`)
+          .join(
+            ' or '
+          )} in ${dsName} for your account. Ask for access to your team's log view${(s.datasources?.length ?? 0) > 1 ? ', or pick another data source' : ''}.`
       );
     }
     if (!s.view || !s.views.includes(s.view)) {
@@ -1176,7 +1181,7 @@ function LabelTabs({ model }: { model: LogsExploration }) {
   if (!ctx) {
     return null;
   }
-  const service = getAppConfig().serviceLabel;
+  const service = model.serviceLabel();
   const active = model.primaryLabel();
   const tabs = Array.from(new Set([service, ...labelTabs, active])).filter((l) => ctx.labels.includes(l));
   const remaining = ctx.labels.filter((l) => !tabs.includes(l));

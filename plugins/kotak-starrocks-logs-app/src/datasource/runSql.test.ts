@@ -3,7 +3,7 @@ import { of, throwError, lastValueFrom } from 'rxjs';
 import { dateTime } from '@grafana/data';
 
 import { setAppConfig } from '../config/config';
-import { fetchColumns, fetchViews, runSql, runSqlOnce, setSessionZone, stringColumn } from './api';
+import { fetchViews, fetchViewSample, runSql, runSqlOnce, setSessionZone, stringColumn } from './api';
 
 const fetch = jest.fn();
 jest.mock('@grafana/runtime', () => {
@@ -112,35 +112,79 @@ describe('runSql: one statement through /api/ds/query as the signed-in user', ()
 });
 
 describe('view list and columns', () => {
-  it('lists only views with the data source prefix, sorted (SHOW TABLES, Ranger-filtered)', async () => {
-    fetch.mockReturnValue(
-      of(okResponse([{ name: 'Tables', values: ['vw_eks_app_logs_b', 'other', 'vw_eks_app_logs_a'] }], 'views'))
-    );
-    expect(await fetchViews(range)).toEqual(['vw_eks_app_logs_a', 'vw_eks_app_logs_b']);
-    expect(fetch.mock.calls[0][0].data.queries[0].rawSql).toBe("SHOW TABLES LIKE 'vw_eks_app_logs_%'");
-  });
-
-  it('reads the columns from SELECT * LIMIT 0 once per data source and view; a failure is retried', async () => {
-    fetch.mockReturnValueOnce(
-      throwError(() => ({ status: 500, data: { results: { columns: { error: 'boom', status: 500 } } } }))
-    );
-    await expect(fetchColumns('vw_c', range, 'dsx')).rejects.toThrow('boom');
-    fetch.mockReturnValue(
+  it('lists the views of every prefix, sorted (one SHOW TABLES LIKE each, Ranger-filtered)', async () => {
+    fetch.mockImplementation((req: { data: { queries: Array<{ rawSql: string }> } }) =>
       of(
         okResponse(
           [
-            { name: 'observed_timestamp', values: [] },
-            { name: 'message', values: [] },
+            {
+              name: 'Tables',
+              values: req.data.queries[0].rawSql.includes('genai')
+                ? ['vw_genai_logs_app_7001_agentrouter']
+                : ['vw_eks_app_logs_b', 'vw_eksXapp_logs_like_wildcard', 'vw_eks_app_logs_a'],
+            },
           ],
-          'columns'
+          'views'
         )
       )
     );
-    expect(await fetchColumns('vw_c', range, 'dsx')).toEqual(['observed_timestamp', 'message']);
-    expect(await fetchColumns('vw_c', range, 'dsx')).toEqual(['observed_timestamp', 'message']);
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(fetch.mock.calls[1][0].data.queries[0].rawSql).toBe(
-      'SELECT /*+ SET_VAR(query_timeout = 120) */ * FROM `vw_c` LIMIT 0'
+    expect(await fetchViews(range)).toEqual([
+      'vw_eks_app_logs_a',
+      'vw_eks_app_logs_b',
+      'vw_genai_logs_app_7001_agentrouter',
+    ]);
+    expect(fetch.mock.calls.map((c) => c[0].data.queries[0].rawSql)).toEqual([
+      "SHOW TABLES LIKE 'vw_eks_app_logs_%'",
+      "SHOW TABLES LIKE 'vw_genai_logs_%'",
+    ]);
+  });
+
+  it("reads a view's columns from one row of the last day, else from any row; cached; a failure is retried", async () => {
+    const row = (fields: Array<{ name: string; values: unknown[] }>) => of(okResponse(fields, 'columns'));
+    // the usual time column exists: one bounded query
+    fetch.mockReturnValueOnce(
+      row([
+        { name: 'observed_timestamp', values: ['2026-11-26 10:00:00'] },
+        { name: 'message', values: ['hello'] },
+      ])
     );
+    expect(await fetchViewSample('vw_a', range, 'dsx')).toEqual({
+      names: ['observed_timestamp', 'message'],
+      row: { observed_timestamp: '2026-11-26 10:00:00', message: 'hello' },
+    });
+    expect(await fetchViewSample('vw_a', range, 'dsx')).toMatchObject({ names: ['observed_timestamp', 'message'] });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0].data.queries[0].rawSql).toBe(
+      'SELECT /*+ SET_VAR(query_timeout = 120) */ * FROM `vw_a` WHERE `observed_timestamp` >= DATE_SUB(NOW(), INTERVAL 1 DAY) LIMIT 1'
+    );
+
+    // another time column: the bounded query fails, the plain LIMIT 1 gives the names
+    fetch.mockReset();
+    fetch
+      .mockReturnValueOnce(
+        throwError(() => ({
+          status: 400,
+          data: { results: { columns: { error: 'Column observed_timestamp not found', status: 400 } } },
+        }))
+      )
+      .mockReturnValueOnce(
+        row([
+          { name: 'event_time', values: ['x'] },
+          { name: 'body', values: ['y'] },
+        ])
+      );
+    expect((await fetchViewSample('vw_genai', range, 'dsx')).names).toEqual(['event_time', 'body']);
+    expect(fetch.mock.calls[1][0].data.queries[0].rawSql).toBe(
+      'SELECT /*+ SET_VAR(query_timeout = 120) */ * FROM `vw_genai` LIMIT 1'
+    );
+
+    // both fail: an error, and the next call tries again
+    fetch.mockReset();
+    fetch.mockReturnValue(
+      throwError(() => ({ status: 500, data: { results: { columns: { error: 'boom', status: 500 } } } }))
+    );
+    await expect(fetchViewSample('vw_c', range, 'dsx')).rejects.toThrow('boom');
+    fetch.mockReturnValue(row([{ name: 'observed_timestamp', values: ['t'] }]));
+    expect((await fetchViewSample('vw_c', range, 'dsx')).names).toEqual(['observed_timestamp']);
   });
 });
